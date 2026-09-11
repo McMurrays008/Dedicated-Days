@@ -1,0 +1,6 @@
+__pycache__/
+.env
+downloads/
+tpn_failure.png
+tpn_failure.html
+*.pyc

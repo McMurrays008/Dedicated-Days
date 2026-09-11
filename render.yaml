@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: tpn-dedicated-day
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: TIMEZONE
+        value: Europe/London
+      - key: HEADLESS
+        value: "true"
+      - key: WORKING_DAYS_TO_EXPORT
+        value: "7"
+      - key: SERVICE_PREFIX
+        value: DD
+      - key: DATE_MODE
+        value: last_working_day
+      - key: AUTO_REFRESH_ON_START
+        value: "true"
+      - key: TPN_LOGIN_URL
+        value: https://connect.tpnsecure.com/
+      - key: TPN_USERNAME
+        sync: false
+      - key: TPN_PASSWORD
+        sync: false
+      - key: REFRESH_TOKEN
+        generateValue: true
+      - key: TPN_HOLIDAYS
+        value: ""
