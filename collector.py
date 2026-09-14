@@ -85,6 +85,38 @@ def click_named(page, name, exact=True):
         except Exception: pass
     raise RuntimeError(f"Could not find visible control: {name}")
 
+def click_top_nav(page, name):
+    """Click a TPN Connect top navigation item.
+
+    Pilot TPN Connect renders the icon and label inside the same navigation
+    control, so its accessible name is not always an exact text match.  Search
+    both the page and any child frames using forgiving text selectors.
+    """
+    pattern=re.compile(rf"\b{re.escape(name)}\b",re.I)
+    contexts=[page]+list(page.frames)
+    for ctx in contexts:
+        candidates=[
+            ctx.get_by_role("link",name=pattern),
+            ctx.get_by_role("button",name=pattern),
+            ctx.get_by_role("menuitem",name=pattern),
+            ctx.locator("a").filter(has_text=pattern),
+            ctx.locator("button").filter(has_text=pattern),
+            ctx.locator("[onclick]").filter(has_text=pattern),
+            ctx.get_by_text(pattern),
+        ]
+        for loc in candidates:
+            try:
+                count=min(loc.count(),8)
+                for i in range(count):
+                    item=loc.nth(i)
+                    if item.is_visible():
+                        try: item.click(timeout=12000,force=True)
+                        except Exception: item.evaluate("el=>el.click()")
+                        return
+            except Exception:
+                pass
+    raise RuntimeError(f"Could not find visible top navigation control: {name}")
+
 def fill_date(page, which, value):
     stem="DateFrom" if "from" in which.lower() else "DateTo"
     candidates=[
@@ -146,28 +178,39 @@ def click_export(page, regex, target, cb):
 
 def export_integration(page,start,end,cb):
     stage(cb,"Opening Integration")
-    click_named(page,"Integration",True)
-    page.wait_for_timeout(900)
+
+    # The Pilot site keeps the Integration page under /Dashboard and opens it
+    # as an in-page tab.  Navigating to Dashboard first makes the top menu
+    # predictable after login, then the forgiving nav selector handles the
+    # icon+text control used by TPN Connect.
+    base=os.getenv("TPN_LOGIN_URL","https://pilot.tpnconnect.com/").rstrip("/")
+    dashboard_url=os.getenv("TPN_DASHBOARD_URL",base+"/Dashboard")
+    if "/dashboard" not in page.url.lower():
+        try:
+            page.goto(dashboard_url,wait_until="domcontentloaded",timeout=45000)
+            page.wait_for_timeout(1200)
+        except Exception:
+            pass
+    click_top_nav(page,"Integration")
+    page.wait_for_timeout(1200)
+
     stage(cb,"Setting Integration date range")
     fill_date(page,"Date From",dtxt(start)); fill_date(page,"Date To",dtxt(end))
-    # Try to select "All" export type only when a suitable visible control exists.
-    for sel in ["select[name*='Export' i]","select[id*='Export' i]"]:
+
+    # Requestor is the required export type on the Pilot Integration screen.
+    try:
+        radio=page.get_by_label(re.compile(r"^Requestor$",re.I))
+        if radio.count() and radio.first.is_visible():
+            radio.first.check(force=True)
+    except Exception:
         try:
-            loc=page.locator(sel)
-            if loc.count() and loc.first.is_visible():
-                try: loc.first.select_option(label="All")
-                except Exception: pass
-                break
-        except Exception: pass
-    # Some Integration pages require a search/load button before export; harmless when absent.
-    for label in ("Search","Browse","Load"):
-        try:
-            b=page.get_by_role("button",name=label,exact=True)
-            if b.count() and b.first.is_visible():
-                b.first.click(); page.wait_for_timeout(1000); break
-        except Exception: pass
+            radio=page.get_by_text(re.compile(r"^Requestor$",re.I))
+            if radio.count() and radio.first.is_visible(): radio.first.click(force=True)
+        except Exception:
+            pass
+
     target=DOWNLOAD_DIR/f"RAW_ConsignmentExport_{datetime.now():%Y%m%d_%H%M%S}.csv"
-    return click_export(page,r"^Export$|Export.*CSV|Download",target,cb)
+    return click_export(page,r"^Export$",target,cb)
 
 def export_browse(page,start,end,cb):
     stage(cb,"Opening Browse")
