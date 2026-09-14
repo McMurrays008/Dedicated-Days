@@ -214,14 +214,65 @@ def export_integration(page,start,end,cb):
 
 def export_browse(page,start,end,cb):
     stage(cb,"Opening Browse")
-    click_named(page,"Browse",True)
-    page.wait_for_timeout(800)
+
+    # Pilot TPN Connect uses Browse as a dropdown.  Clicking the top-level
+    # Browse control only opens that dropdown; the actual browse screen used
+    # for the export is the "Browse Discreps" submenu item.  Use forced/DOM
+    # clicks because the dropdown itself can otherwise intercept pointer events.
+    click_top_nav(page,"Browse")
+    page.wait_for_timeout(500)
+    submenu=None
+    pattern=re.compile(r"Browse\s+Discrep",re.I)
+    for candidate in [
+        page.get_by_role("link",name=pattern),
+        page.get_by_role("menuitem",name=pattern),
+        page.locator("a").filter(has_text=pattern),
+        page.locator("[onclick]").filter(has_text=pattern),
+        page.get_by_text(pattern),
+    ]:
+        try:
+            for i in range(min(candidate.count(),8)):
+                item=candidate.nth(i)
+                if item.is_visible():
+                    submenu=item
+                    break
+            if submenu: break
+        except Exception:
+            pass
+    if not submenu:
+        raise RuntimeError("Could not find visible Browse Discreps submenu item")
+    try: submenu.click(timeout=12000,force=True)
+    except Exception: submenu.evaluate("el=>el.click()")
+    page.wait_for_timeout(1000)
+
     stage(cb,"Setting Browse date range")
     fill_date(page,"Date From",dtxt(start)); fill_date(page,"Date To",dtxt(end))
     stage(cb,"Loading Browse results")
-    b=page.get_by_role("button",name="Browse",exact=True)
-    if b.count(): b.last.click()
-    else: click_named(page,"Browse",True)
+
+    # Avoid the top navigation Browse control (onclick=tabBrowseChange), which
+    # is not the search button and can reopen the dropdown. Prefer a Browse
+    # control in the content area/form.
+    search=None
+    candidates=[
+        page.locator("input[value='Browse']:not([onclick*='tabBrowseChange'])"),
+        page.locator("button:not([onclick*='tabBrowseChange'])").filter(has_text=re.compile(r"^Browse$",re.I)),
+        page.get_by_role("button",name=re.compile(r"^Browse$",re.I)),
+    ]
+    for candidate in candidates:
+        try:
+            for i in range(candidate.count()-1,-1,-1):
+                item=candidate.nth(i)
+                if item.is_visible():
+                    onclick=(item.get_attribute("onclick") or "").lower()
+                    if "tabbrowsechange" not in onclick:
+                        search=item; break
+            if search: break
+        except Exception:
+            pass
+    if not search:
+        raise RuntimeError("Could not find Browse results/search button")
+    try: search.click(timeout=15000,force=True)
+    except Exception: search.evaluate("el=>el.click()")
     page.wait_for_timeout(1400)
     target=DOWNLOAD_DIR/f"RAW_TPN_Dedicated_Day_Browse_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     return click_export(page,r"Export\s*To\s*Excel",target,cb)
