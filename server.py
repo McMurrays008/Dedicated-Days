@@ -201,7 +201,7 @@ pre{{background:#f4f7fb;padding:16px;border-radius:8px;overflow:auto}}
   </div>
 </div>
 <script>
-const tokenConfigured = {configured};
+const tokenConfigured = {str(configured).lower()};
 const tokenState = document.getElementById('tokenState');
 tokenState.innerHTML = tokenConfigured
   ? '<span class="ok">REFRESH_TOKEN is configured in Render.</span>'
