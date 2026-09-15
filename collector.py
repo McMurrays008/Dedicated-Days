@@ -389,11 +389,10 @@ def manual_morning_import(xlsx_path, stage_callback=None):
     """
     stage(stage_callback,"Reading manual Dedicated Day Check")
     browse=filter_browse(read_xlsx(xlsx_path))
-    dates=[parse_delivery_date(first(r,"Delivery Date")) for r in browse]
-    dates=[d for d in dates if d]
-    if not dates:
-        raise RuntimeError("No Delivery Date values were found in the uploaded Dedicated Day Check.")
-    target=max(dates)
+    # The manually uploaded morning file may contain future delivery dates.
+    # The fixed population must be for the day the file is imported, not the
+    # maximum Delivery Date present in the workbook.
+    target=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).date()
     rows=make_dashboard_rows(browse,status_lookup=None,target_date=target)
     if not rows:
         raise RuntimeError("No Dedicated Day rows survived the 10 September collection rules.")
