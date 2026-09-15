@@ -218,7 +218,7 @@ async function uploadMorning() {{
   result.textContent='Importing morning Dedicated Day Check…';
   try {{
     const r=await fetch('/morning-import',{{method:'POST',headers:{{'X-Refresh-Token':token}},body:form}});
-    result.textContent='HTTP '+r.status+'\n'+await r.text();
+    result.textContent='HTTP '+r.status+'\\n'+await r.text();
     await loadStatus();
   }} catch(e) {{
     result.textContent='Import failed: '+e;
@@ -237,7 +237,7 @@ async function runRefresh(mode) {{
       headers: {{'X-Refresh-Token': token}}
     }});
     const text = await r.text();
-    result.textContent = 'HTTP ' + r.status + '\n' + text;
+    result.textContent = 'HTTP ' + r.status + '\\n' + text;
     await loadStatus();
   }} catch (e) {{
     result.textContent = 'Request failed: ' + e;
