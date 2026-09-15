@@ -118,21 +118,89 @@ def click_top_nav(page, name):
     raise RuntimeError(f"Could not find visible top navigation control: {name}")
 
 def fill_date(page, which, value):
-    stem="DateFrom" if "from" in which.lower() else "DateTo"
-    candidates=[
+    """Find TPN date fields across the main page and child frames.
+
+    Pilot TPN Browse does not consistently use the DateFrom/DateTo names used
+    on Integration, so this also recognises labels, ids/names containing
+    from/to + date, and the first input following a visible Date From/To label.
+    """
+    want_from="from" in which.lower()
+    stem="DateFrom" if want_from else "DateTo"
+    word="from" if want_from else "to"
+    contexts=[page]+[f for f in page.frames if f is not page.main_frame]
+
+    selectors=[
         f"input[name='{stem}']",
         f"input[name*='{stem}' i]",
         f"input[id*='{stem}' i]",
+        f"input[name*='date'][name*='{word}' i]",
+        f"input[id*='date'][id*='{word}' i]",
+        f"input[name*='{word}' i][name*='date' i]",
+        f"input[id*='{word}' i][id*='date' i]",
         f"input[placeholder*='{which}' i]",
+        f"input[aria-label*='{which}' i]",
     ]
-    loc=first_visible(page,candidates)
-    if not loc:
+
+    loc=None
+    for ctx in contexts:
+        loc=first_visible(ctx,selectors)
+        if loc: break
+
+        # Accessible labels, where present.
         try:
-            q=page.get_by_label(re.compile(which,re.I))
-            if q.count() and q.first.is_visible(): loc=q.first
-        except Exception: pass
-    if not loc: raise RuntimeError(f"Could not identify {which} field")
-    loc.fill(value)
+            q=ctx.get_by_label(re.compile(rf"Date\s*{word}",re.I))
+            for i in range(q.count()):
+                if q.nth(i).is_visible():
+                    loc=q.nth(i); break
+        except Exception:
+            pass
+        if loc: break
+
+        # TPN/Kendo pages sometimes render a plain text label with an
+        # unlabelled input immediately after it.
+        try:
+            labels=ctx.get_by_text(re.compile(rf"^\s*Date\s*{word}\s*:?\s*$",re.I))
+            for i in range(min(labels.count(),10)):
+                lab=labels.nth(i)
+                if not lab.is_visible(): continue
+                q=lab.locator("xpath=following::input[not(@type='hidden')][1]")
+                if q.count() and q.first.is_visible():
+                    loc=q.first; break
+        except Exception:
+            pass
+        if loc: break
+
+    if not loc:
+        # Produce useful diagnostics in Render logs if TPN changes again.
+        found=[]
+        for ctx in contexts:
+            try:
+                for i in range(min(ctx.locator("input").count(),40)):
+                    el=ctx.locator("input").nth(i)
+                    if not el.is_visible(): continue
+                    found.append({
+                        "name":el.get_attribute("name"),
+                        "id":el.get_attribute("id"),
+                        "type":el.get_attribute("type"),
+                        "placeholder":el.get_attribute("placeholder"),
+                        "aria":el.get_attribute("aria-label"),
+                    })
+            except Exception:
+                pass
+        print(f"[collector] Visible inputs while looking for {which}: {found}",flush=True)
+        raise RuntimeError(f"Could not identify {which} field")
+
+    # Kendo/date-picker inputs can be readonly or have JS handlers. Fill first;
+    # fall back to DOM value assignment plus input/change events.
+    try:
+        loc.fill(value,force=True)
+    except Exception:
+        loc.evaluate("""(el, value) => {
+            el.removeAttribute('readonly');
+            el.value=value;
+            el.dispatchEvent(new Event('input',{bubbles:true}));
+            el.dispatchEvent(new Event('change',{bubbles:true}));
+        }""",value)
     try: loc.press("Tab")
     except Exception: pass
 
