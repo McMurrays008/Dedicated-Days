@@ -327,7 +327,7 @@ def filter_browse(rows):
         dele=first(r,"Del","Deliver","Delivery Depot")
         if not service.startswith(prefix): continue
         if req and depot_code(req)!="8": continue
-        if dele and depot_code(dele)=="8": continue
+        # 10 September method: Delivery Depot 8 is deliberately INCLUDED.
         kept.append(r)
     return kept
 
@@ -380,6 +380,37 @@ def atomic_write(payload):
     tmp=DATA_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
     tmp.replace(DATA_FILE)
+
+
+def manual_morning_import(xlsx_path, stage_callback=None):
+    """Initialise today's fixed delivery population from the manually supplied
+    TPN Dedicated Day Check. Statuses are whatever is present in that file;
+    later Browse refreshes update Status only and never add/remove deliveries.
+    """
+    stage(stage_callback,"Reading manual Dedicated Day Check")
+    browse=filter_browse(read_xlsx(xlsx_path))
+    dates=[parse_delivery_date(first(r,"Delivery Date")) for r in browse]
+    dates=[d for d in dates if d]
+    if not dates:
+        raise RuntimeError("No Delivery Date values were found in the uploaded Dedicated Day Check.")
+    target=max(dates)
+    rows=make_dashboard_rows(browse,status_lookup=None,target_date=target)
+    if not rows:
+        raise RuntimeError("No Dedicated Day rows survived the 10 September collection rules.")
+    payload={
+        "delivery_date":target.isoformat(),
+        "generated_at":datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).isoformat(timespec="seconds"),
+        "mode":"manual_morning_import",
+        "source":{
+            "manual_browse":Path(xlsx_path).name,
+            "browse_dd_rows":len(browse),
+            "fixed_population":len(rows)
+        },
+        "rows":rows
+    }
+    atomic_write(payload)
+    stage(stage_callback,f"Morning import complete: {len(rows)} deliveries fixed for {target.isoformat()}")
+    return {"delivery_date":target.isoformat(),"rows":len(rows),"pallets":sum(num(r.get("Pallets")) for r in rows)}
 
 def full_refresh(stage_callback=None):
     holidays=env_holidays()
@@ -436,21 +467,30 @@ def full_refresh(stage_callback=None):
     return payload["source"] | {"delivery_date":payload["delivery_date"],"rows":len(rows)}
 
 def status_refresh(stage_callback=None):
-    if not DATA_FILE.exists(): return full_refresh(stage_callback)
+    if not DATA_FILE.exists():
+        raise RuntimeError("No morning Dedicated Day Check has been imported yet.")
     current=json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    if not current.get("rows"): return full_refresh(stage_callback)
-    holidays=env_holidays()
-    end=most_recent_working_day(date.today(),holidays)
-    start,end=working_range(end,int(os.getenv("WORKING_DAYS_TO_EXPORT","7")),holidays)
+    if not current.get("rows"):
+        raise RuntimeError("The morning import contains no deliveries.")
+
+    try:
+        target=datetime.strptime(current["delivery_date"],"%Y-%m-%d").date()
+    except Exception:
+        raise RuntimeError("The current dashboard has no valid delivery_date.")
+
+    # Search Browse for the fixed delivery day only. This refresh is status-only:
+    # it cannot add or remove deliveries from the morning population.
+    stage(stage_callback,f"Refreshing Browse statuses for {dtxt(target)}")
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=os.getenv("HEADLESS","true").lower()=="true",
             args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-extensions","--renderer-process-limit=1"])
         context=browser.new_context(accept_downloads=True,viewport={"width":1100,"height":760})
         page=context.new_page()
         page.route("**/*",lambda route: route.abort() if route.request.resource_type in {"image","media","font"} else route.continue_())
+        page.set_default_timeout(15000)
         try:
             login(page,stage_callback)
-            browse_path=export_browse(page,start,end,stage_callback)
+            browse_path=export_browse(page,target,target,stage_callback)
         except Exception:
             try: page.screenshot(path=str(FAILURE_SCREENSHOT),full_page=False)
             except Exception: pass
@@ -460,19 +500,32 @@ def status_refresh(stage_callback=None):
         finally:
             context.close(); browser.close(); gc.collect()
 
-    stage(stage_callback,"Filtering Browse export locally")
+    stage(stage_callback,"Matching Browse statuses to morning Dockets")
     browse=filter_browse(read_xlsx(browse_path))
-    latest={norm_docket(first(r,"Docket")):norm(first(r,"STATUS","Status","Status Code")) for r in browse}
+    latest={}
+    for r in browse:
+        docket=norm_docket(first(r,"Docket","Consignment","Consignment Number"))
+        if docket:
+            latest[docket]=norm(first(r,"STATUS","Status","Status Code"))
+
     changed=matched=0
     for r in current["rows"]:
         d=norm_docket(r.get("Docket"))
-        if d in latest:
+        if d in latest and latest[d]:
             matched+=1
             if latest[d] != norm(r.get("Status")):
-                r["Status"]=latest[d]; changed+=1
+                r["Status"]=latest[d]
+                changed+=1
+
     current["generated_at"]=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).isoformat(timespec="seconds")
     current["mode"]="status"
-    current["status_refresh"]={"matched_dockets":matched,"changed_statuses":changed,"source":Path(browse_path).name}
+    current["status_refresh"]={
+        "matched_dockets":matched,
+        "changed_statuses":changed,
+        "source":Path(browse_path).name,
+        "delivery_date":target.isoformat()
+    }
     atomic_write(current)
     stage(stage_callback,f"Completed status refresh: {matched} matched; {changed} changed")
     return current["status_refresh"]
+

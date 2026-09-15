@@ -9,10 +9,10 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from collector import full_refresh, status_refresh
+from collector import full_refresh, status_refresh, manual_morning_import
 
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
@@ -121,6 +121,26 @@ def refresh(mode: str, x_refresh_token: str | None = Header(default=None)):
     return {"ok": True, "message": f"{mode} refresh started"}
 
 
+
+@app.post("/morning-import")
+async def morning_import(file: UploadFile = File(...), x_refresh_token: str | None = Header(default=None)):
+    expected=os.getenv("REFRESH_TOKEN")
+    if not expected:
+        raise HTTPException(503,"REFRESH_TOKEN is not configured in Render")
+    if x_refresh_token != expected:
+        raise HTTPException(401,"Invalid refresh token")
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(400,"Please upload the TPN Dedicated Day Check .xlsx file")
+    target=HERE/"morning-dedicated-day-check.xlsx"
+    target.write_bytes(await file.read())
+    try:
+        result=manual_morning_import(target)
+        status.update(last_success=datetime.now(TZ).isoformat(timespec="seconds"),last_error=None,stage="Morning import completed")
+        return {"ok":True,"result":result}
+    except Exception as e:
+        status.update(last_error=f"{type(e).__name__}: {e}",stage="Morning import failed")
+        raise HTTPException(500,str(e))
+
 @app.get("/admin")
 def admin():
     configured = "true" if os.getenv("REFRESH_TOKEN") else "false"
@@ -157,10 +177,14 @@ pre{{background:#f4f7fb;padding:16px;border-radius:8px;overflow:auto}}
         <label for="token">Refresh token</label>
         <input id="token" type="password" autocomplete="off" placeholder="Paste your REFRESH_TOKEN from Render">
       </div>
-      <button onclick="runRefresh('full')">Run Full Refresh Now</button>
+      <div class="field">
+        <label for="morningFile">Morning TPN Dedicated Day Check (.xlsx)</label>
+        <input id="morningFile" type="file" accept=".xlsx">
+      </div>
+      <button onclick="uploadMorning()">Import Morning Check</button>
       <button class="secondary" onclick="runRefresh('status')">Update Status Now</button>
     </div>
-    <p class="muted">The token stays in this browser page only and is sent as the X-Refresh-Token header. It is not written into GitHub.</p>
+    <p class="muted">Import the morning Dedicated Day Check once. That fixes the day's delivery population. Status refreshes only update those Dockets; they do not add or remove deliveries.</p>
     <div id="result">Ready.</div>
   </div>
 
@@ -171,8 +195,8 @@ pre{{background:#f4f7fb;padding:16px;border-radius:8px;overflow:auto}}
 
   <div class="card">
     <h2>Schedule</h2>
-    <p>Full refresh: <strong>08:00 Europe/London</strong>.</p>
-    <p>Status refreshes: <strong>10:00, 12:00, 14:00, 16:00, 18:00 Europe/London</strong>.</p>
+    <p>Morning population: <strong>manual import at about 09:30 Europe/London</strong>.</p>
+    <p>Automatic Browse status refreshes: <strong>10:00, 12:00, 14:00, 16:00, 18:00 Europe/London</strong>.</p>
     <p>Dashboard checks its JSON every 5 minutes.</p>
   </div>
 </div>
@@ -182,6 +206,24 @@ const tokenState = document.getElementById('tokenState');
 tokenState.innerHTML = tokenConfigured
   ? '<span class="ok">REFRESH_TOKEN is configured in Render.</span>'
   : '<span class="bad">REFRESH_TOKEN is NOT configured in Render. Add it under Environment before using the buttons.</span>';
+
+async function uploadMorning() {{
+  const result = document.getElementById('result');
+  const token = document.getElementById('token').value.trim();
+  const file = document.getElementById('morningFile').files[0];
+  if (!token) {{ result.textContent='Paste the REFRESH_TOKEN first.'; return; }}
+  if (!file) {{ result.textContent='Choose the morning TPN Dedicated Day Check .xlsx file first.'; return; }}
+  const form=new FormData();
+  form.append('file',file);
+  result.textContent='Importing morning Dedicated Day Check…';
+  try {{
+    const r=await fetch('/morning-import',{{method:'POST',headers:{{'X-Refresh-Token':token}},body:form}});
+    result.textContent='HTTP '+r.status+'\n'+await r.text();
+    await loadStatus();
+  }} catch(e) {{
+    result.textContent='Import failed: '+e;
+  }}
+}}
 
 async function runRefresh(mode) {{
   const result = document.getElementById('result');
@@ -220,14 +262,6 @@ setInterval(loadStatus, 5000);
 
 
 scheduler = BackgroundScheduler(timezone=TZ)
-scheduler.add_job(
-    lambda: start_background("full"),
-    "cron",
-    hour=8,
-    minute=0,
-    id="full_0800",
-    replace_existing=True,
-)
 for h in (10, 12, 14, 16, 18):
     scheduler.add_job(
         lambda: start_background("status"),
@@ -242,20 +276,6 @@ scheduler.start()
 
 @app.on_event("startup")
 def startup_refresh():
-    if os.getenv("AUTO_REFRESH_ON_START", "true").lower() != "true":
-        return
-    p = HERE / "dedicated-day-data.json"
-    stale = True
-    if p.exists():
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-            stamp = payload.get("generated_at")
-            if stamp:
-                dt = datetime.fromisoformat(stamp)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=TZ)
-                stale = dt.astimezone(TZ).date() != datetime.now(TZ).date()
-        except Exception:
-            pass
-    if stale:
-        start_background("full")
+    # Morning population is intentionally manual. Scheduled Browse status
+    # refreshes begin only after that day's file has been imported.
+    return
