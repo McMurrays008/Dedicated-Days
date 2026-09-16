@@ -607,15 +607,38 @@ def read_csv(path):
     return list(csv.DictReader(text.splitlines()))
 
 def read_xlsx(path):
+    """Read TPN Excel exports even when Pilot inserts title/blank rows above
+    the real column headings."""
     wb=load_workbook(path,read_only=True,data_only=True)
     ws=wb.active
-    rows=ws.iter_rows(values_only=True)
-    headers=[norm(x) for x in next(rows)]
+    raw=ws.iter_rows(values_only=True)
+
+    header_vals=None
+    buffered=[]
+    for idx,vals in enumerate(raw):
+        buffered.append(vals)
+        cells=[norm(v).lower() for v in vals]
+        has_docket=any(c in {"docket","docket no","docket number","consignment","consignment number"} for c in cells)
+        has_tpn_fields=any(c in {"status","service","requesting depot","delivery depot"} for c in cells)
+        if has_docket and has_tpn_fields:
+            header_vals=vals
+            break
+        if idx>=39:
+            break
+
+    if header_vals is None:
+        wb.close()
+        sample=[[norm(v) for v in row[:12]] for row in buffered[:12]]
+        print(f"[collector] XLSX HEADER DIAGNOSTIC file={Path(path).name} rows={sample}",flush=True)
+        raise RuntimeError("Could not identify TPN Excel header row")
+
+    headers=[norm(x) for x in header_vals]
     out=[]
-    for vals in rows:
+    for vals in raw:
         if any(v is not None and str(v).strip() for v in vals):
             out.append(dict(zip(headers,vals)))
     wb.close()
+    print(f"[collector] Read {len(out)} Excel rows from {Path(path).name}; headers={headers[:20]}",flush=True)
     return out
 
 def first(r,*names):
@@ -673,7 +696,7 @@ def parse_delivery_date(v):
 def status_lookup_from_integration(rows):
     m={}
     for r in rows:
-        d=norm_docket(first(r,"Docket","Consignment","Consignment Number"))
+        d=norm_docket(first(r,"Docket","Docket No","Docket Number","Consignment","Consignment Number"))
         if d: m[d]=norm(first(r,"Status","STATUS","Status Code"))
     return m
 
@@ -682,7 +705,7 @@ def make_dashboard_rows(browse_rows,status_lookup=None,target_date=None):
     for r in browse_rows:
         ddate=parse_delivery_date(first(r,"Delivery Date"))
         if target_date and ddate and ddate!=target_date: continue
-        docket=norm_docket(first(r,"Docket","Consignment","Consignment Number"))
+        docket=norm_docket(first(r,"Docket","Docket No","Docket Number","Consignment","Consignment Number"))
         if not docket: continue
         status=(status_lookup or {}).get(docket) or norm(first(r,"STATUS","Status","Status Code"))
         out.append({
@@ -824,7 +847,7 @@ def status_refresh(stage_callback=None):
     browse=filter_browse(read_xlsx(browse_path))
     latest={}
     for r in browse:
-        docket=norm_docket(first(r,"Docket","Consignment","Consignment Number"))
+        docket=norm_docket(first(r,"Docket","Docket No","Docket Number","Consignment","Consignment Number"))
         if docket:
             latest[docket]=norm(first(r,"STATUS","Status","Status Code"))
 
