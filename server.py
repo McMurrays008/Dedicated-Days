@@ -28,6 +28,34 @@ status = {
     "last_error": None,
 }
 
+STATUS_FILE = HERE / "refresh-status.json"
+DATA_FILE = HERE / "dedicated-day-data.json"
+
+
+def save_status():
+    """Persist refresh progress so a web-process restart does not erase it."""
+    try:
+        tmp = STATUS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(status, indent=2), encoding="utf-8")
+        tmp.replace(STATUS_FILE)
+    except Exception as e:
+        print(f"[server] Could not persist refresh status: {e}", flush=True)
+
+
+def load_status():
+    """Restore the last known refresh state after a process restart."""
+    if not STATUS_FILE.exists():
+        return
+    try:
+        saved = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+        if isinstance(saved, dict):
+            status.update(saved)
+    except Exception as e:
+        print(f"[server] Could not restore refresh status: {e}", flush=True)
+
+
+load_status()
+
 
 def run_job(mode):
     if not lock.acquire(blocking=False):
@@ -39,10 +67,12 @@ def run_job(mode):
         stage="Starting",
         last_attempt=datetime.now(TZ).isoformat(timespec="seconds"),
     )
+    save_status()
 
     try:
         def cb(name):
             status["stage"] = name
+            save_status()
             print(f"[server] {mode}: {name}", flush=True)
 
         result = full_refresh(cb) if mode == "full" else status_refresh(cb)
@@ -51,13 +81,16 @@ def run_job(mode):
             last_error=None,
             stage="Completed",
         )
+        save_status()
         return {"ok": True, "mode": mode, "result": result}
     except Exception as e:
         status.update(last_error=f"{type(e).__name__}: {e}", stage="Failed")
+        save_status()
         print("[server] ERROR", status["last_error"], flush=True)
         raise
     finally:
         status["running"] = False
+        save_status()
         lock.release()
 
 
@@ -136,9 +169,11 @@ async def morning_import(file: UploadFile = File(...), x_refresh_token: str | No
     try:
         result=manual_morning_import(target)
         status.update(last_success=datetime.now(TZ).isoformat(timespec="seconds"),last_error=None,stage="Morning import completed")
+        save_status()
         return {"ok":True,"result":result}
     except Exception as e:
         status.update(last_error=f"{type(e).__name__}: {e}",stage="Morning import failed")
+        save_status()
         raise HTTPException(500,str(e))
 
 @app.get("/admin")
@@ -276,6 +311,34 @@ scheduler.start()
 
 @app.on_event("startup")
 def startup_refresh():
-    # Morning population is intentionally manual. Scheduled Browse status
-    # refreshes begin only after that day's file has been imported.
-    return
+    """Recover an interrupted status refresh after a Render process restart.
+
+    The morning population is already stored in dedicated-day-data.json.
+    If the previous process died while a status refresh was running, mark that
+    attempt as interrupted and automatically restart it once this process is up.
+    """
+    load_status()
+
+    was_interrupted = bool(status.get("running")) and status.get("mode") == "status"
+    status["running"] = False
+
+    if was_interrupted:
+        status["stage"] = "Recovering interrupted status refresh"
+        status["last_error"] = "Previous web process restarted during status refresh; retrying automatically."
+        save_status()
+
+        if DATA_FILE.exists():
+            try:
+                payload = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+                delivery_date = payload.get("delivery_date")
+                today = datetime.now(TZ).date().isoformat()
+                if delivery_date == today and payload.get("rows"):
+                    print("[server] Recovering interrupted Browse status refresh after restart", flush=True)
+                    threading.Timer(8.0, lambda: start_background("status")).start()
+                    return
+            except Exception as e:
+                print(f"[server] Could not validate dashboard data for recovery: {e}", flush=True)
+
+        status["stage"] = "Idle"
+        status["last_error"] = "Refresh was interrupted by a restart; morning population was not available for automatic recovery."
+        save_status()
