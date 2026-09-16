@@ -533,31 +533,70 @@ def export_browse(page,start,end,cb):
         raise RuntimeError("Could not find actionable Browse Export To Excel control")
 
     print(f"[collector] Browse export control href={export.get_attribute('href')!r} onclick={export.get_attribute('onclick')!r}",flush=True)
+
+    # Current Pilot exposes Export To Excel as href="#" with no inline onclick.
+    # Its JavaScript can return the workbook as a network response instead of
+    # Playwright emitting a normal "download" event, so listen for both.
+    captured={"saved":False,"error":None}
+    download_holder={"download":None}
+
+    def capture_excel_response(resp):
+        if captured["saved"]:
+            return
+        try:
+            headers={k.lower():v for k,v in resp.headers.items()}
+            cd=headers.get("content-disposition","")
+            ct=headers.get("content-type","")
+            url=resp.url.lower()
+            looks_excel=(
+                "xlsx" in cd.lower()
+                or "excel" in ct.lower()
+                or "spreadsheet" in ct.lower()
+                or ".xlsx" in url
+            )
+            if looks_excel:
+                body=resp.body()
+                if body and len(body)>100:
+                    target.write_bytes(body)
+                    captured["saved"]=True
+                    print(f"[collector] Captured Browse Excel response from {resp.url}",flush=True)
+        except Exception as e:
+            captured["error"]=repr(e)
+
+    def got_download(d):
+        download_holder["download"]=d
+
+    page.on("response",capture_excel_response)
+    page.on("download",got_download)
     try:
-        with page.expect_download(timeout=120000) as di:
-            try: export.click(timeout=15000,force=True,no_wait_after=True)
-            except Exception: export.evaluate("el=>el.click()")
-        di.value.save_as(target)
-        return target
-    except Exception:
-        # Log the exact export-area controls if TPN did not emit a browser
-        # download event, so the next correction is based on the real action.
-        found=[]
-        for ctx in contexts:
-            for sel in ("a","button","input","[onclick]"):
-                try:
-                    q=ctx.locator(sel)
-                    for i in range(min(q.count(),120)):
-                        el=q.nth(i)
-                        if not el.is_visible(): continue
-                        label=" ".join(((el.inner_text() or "")+" "+(el.get_attribute("value") or "")).split())
-                        if "export" in label.lower() or "excel" in label.lower() or "export" in (el.get_attribute("onclick") or "").lower():
-                            found.append({"tag":sel,"text":label[:120],
-                                          "href":el.get_attribute("href"),
-                                          "onclick":(el.get_attribute("onclick") or "")[:200]})
-                except Exception: pass
-        print(f"[collector] BROWSE EXPORT DIAGNOSTIC controls={found[:100]}",flush=True)
-        raise
+        # Do a normal user-style click because href="#" relies on a JS event
+        # listener attached by the TPN page.
+        try:
+            export.click(timeout=15000)
+        except Exception:
+            export.evaluate("el=>el.click()")
+
+        # Wait up to 60 seconds for either mechanism.
+        for _ in range(120):
+            if download_holder["download"] is not None:
+                download_holder["download"].save_as(target)
+                print(f"[collector] Saved Browse download to {target.name}",flush=True)
+                return target
+            if captured["saved"] and target.exists():
+                return target
+            page.wait_for_timeout(500)
+
+        raise RuntimeError(
+            "Browse Export To Excel was clicked but no Excel download/response "
+            f"was received. href={export.get_attribute('href')!r}, "
+            f"onclick={export.get_attribute('onclick')!r}, "
+            f"capture_error={captured['error']!r}"
+        )
+    finally:
+        try: page.remove_listener("response",capture_excel_response)
+        except Exception: pass
+        try: page.remove_listener("download",got_download)
+        except Exception: pass
 
 def read_csv(path):
     raw=Path(path).read_bytes()
