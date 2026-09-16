@@ -390,7 +390,24 @@ def export_browse(page,start,end,cb):
     page.wait_for_timeout(1000)
 
     stage(cb,"Setting Browse date range")
-    fill_date(page,"Date From",dtxt(start)); fill_date(page,"Date To",dtxt(end))
+
+    # Status refresh rule: search the target day plus the seven PREVIOUS
+    # working days. Example: target 16/09/2026 => 07/09/2026 through 16/09/2026.
+    browse_end=end
+    browse_start=browse_end
+    previous_working_days=0
+    while previous_working_days < 7:
+        browse_start -= timedelta(days=1)
+        if browse_start.weekday() < 5:
+            previous_working_days += 1
+
+    print(
+        f"[collector] Browse search range {dtxt(browse_start)} to {dtxt(browse_end)} "
+        "(7 previous working days + target day)",
+        flush=True,
+    )
+    fill_date(page,"Date From",dtxt(browse_start))
+    fill_date(page,"Date To",dtxt(browse_end))
     stage(cb,"Loading Browse results")
 
     # Pilot TPN has used different labels/types for the content-area submit
