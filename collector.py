@@ -393,31 +393,71 @@ def export_browse(page,start,end,cb):
     fill_date(page,"Date From",dtxt(start)); fill_date(page,"Date To",dtxt(end))
     stage(cb,"Loading Browse results")
 
-    # Avoid the top navigation Browse control (onclick=tabBrowseChange), which
-    # is not the search button and can reopen the dropdown. Prefer a Browse
-    # control in the content area/form.
+    # Pilot TPN has used different labels/types for the content-area submit
+    # control. Search all frames, excluding the top-nav tabBrowseChange control.
     search=None
-    candidates=[
-        page.locator("input[value='Browse']:not([onclick*='tabBrowseChange'])"),
-        page.locator("button:not([onclick*='tabBrowseChange'])").filter(has_text=re.compile(r"^Browse$",re.I)),
-        page.get_by_role("button",name=re.compile(r"^Browse$",re.I)),
-    ]
-    for candidate in candidates:
-        try:
-            for i in range(candidate.count()-1,-1,-1):
-                item=candidate.nth(i)
-                if item.is_visible():
+    contexts=[page]+[f for f in page.frames if f is not page.main_frame]
+    wanted=re.compile(r"^(browse|search|view|go|submit|load|find|refresh)$",re.I)
+    for ctx in contexts:
+        for sel in ("input[type='submit']","button[type='submit']","input[type='button']",
+                    "input","button","[onclick]"):
+            try:
+                q=ctx.locator(sel)
+                for i in range(min(q.count(),100)):
+                    item=q.nth(i)
+                    if not item.is_visible(): continue
                     onclick=(item.get_attribute("onclick") or "").lower()
-                    if "tabbrowsechange" not in onclick:
+                    if "tabbrowsechange" in onclick: continue
+                    typ=(item.get_attribute("type") or "").lower()
+                    value=(item.get_attribute("value") or "").strip()
+                    txt=" ".join((item.inner_text() or "").split()).strip()
+                    aria=(item.get_attribute("aria-label") or "").strip()
+                    label=value or txt or aria
+                    if typ=="submit" or wanted.match(label):
                         search=item; break
+            except Exception:
+                pass
             if search: break
-        except Exception:
-            pass
+        if search: break
+
     if not search:
+        # Last resort: submit the form containing the Browse date controls.
+        for ctx in contexts:
+            try:
+                forms=ctx.locator("form")
+                for i in range(forms.count()):
+                    form=forms.nth(i)
+                    body=(form.inner_text() or "").lower()
+                    if "date from" in body and "date to" in body:
+                        form.evaluate("(f)=>f.requestSubmit ? f.requestSubmit() : f.submit()")
+                        page.wait_for_timeout(1400)
+                        search=True
+                        break
+            except Exception:
+                pass
+            if search: break
+
+    if not search:
+        found=[]
+        for ctx in contexts:
+            for sel in ("button","input","[onclick]"):
+                try:
+                    q=ctx.locator(sel)
+                    for i in range(min(q.count(),100)):
+                        el=q.nth(i)
+                        if not el.is_visible(): continue
+                        found.append({"tag":sel,"type":el.get_attribute("type"),
+                                      "value":el.get_attribute("value"),
+                                      "text":" ".join((el.inner_text() or "").split())[:80],
+                                      "onclick":(el.get_attribute("onclick") or "")[:120]})
+                except Exception: pass
+        print(f"[collector] BROWSE ACTION DIAGNOSTIC visible={found[:150]}",flush=True)
         raise RuntimeError("Could not find Browse results/search button")
-    try: search.click(timeout=15000,force=True)
-    except Exception: search.evaluate("el=>el.click()")
-    page.wait_for_timeout(1400)
+
+    if search is not True:
+        try: search.click(timeout=15000,force=True)
+        except Exception: search.evaluate("el=>el.click()")
+        page.wait_for_timeout(1400)
     target=DOWNLOAD_DIR/f"RAW_TPN_Dedicated_Day_Browse_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     return click_export(page,r"Export\s*To\s*Excel",target,cb)
 
