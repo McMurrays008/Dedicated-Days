@@ -86,35 +86,111 @@ def click_named(page, name, exact=True):
     raise RuntimeError(f"Could not find visible control: {name}")
 
 def click_top_nav(page, name):
-    """Click a TPN Connect top navigation item.
+    """Open a Pilot TPN top-nav item robustly.
 
-    Pilot TPN Connect renders the icon and label inside the same navigation
-    control, so its accessible name is not always an exact text match.  Search
-    both the page and any child frames using forgiving text selectors.
+    Pilot can render the navigation differently between sessions. Try the
+    normal visible controls first, then Browse-specific menu text/onclick
+    elements, then navigate back to /Dashboard and retry once.
     """
-    pattern=re.compile(rf"\b{re.escape(name)}\b",re.I)
-    contexts=[page]+list(page.frames)
-    for ctx in contexts:
-        candidates=[
-            ctx.get_by_role("link",name=pattern),
-            ctx.get_by_role("button",name=pattern),
-            ctx.get_by_role("menuitem",name=pattern),
-            ctx.locator("a").filter(has_text=pattern),
-            ctx.locator("button").filter(has_text=pattern),
-            ctx.locator("[onclick]").filter(has_text=pattern),
-            ctx.get_by_text(pattern),
+    rx=re.compile(rf"^\s*{re.escape(name)}\s*$",re.I)
+
+    def contexts():
+        return [page]+[f for f in page.frames if f is not page.main_frame]
+
+    def try_click():
+        selectors=[
+            f"a:has-text('{name}')",
+            f"button:has-text('{name}')",
+            f"[role='menuitem']:has-text('{name}')",
+            f"[role='link']:has-text('{name}')",
+            f"[onclick*='{name}' i]",
         ]
-        for loc in candidates:
+        for ctx in contexts():
+            # Exact accessible text first.
+            for getter in (
+                lambda: ctx.get_by_role("link",name=rx),
+                lambda: ctx.get_by_role("button",name=rx),
+                lambda: ctx.get_by_role("menuitem",name=rx),
+                lambda: ctx.get_by_text(rx),
+            ):
+                try:
+                    q=getter()
+                    for i in range(min(q.count(),20)):
+                        el=q.nth(i)
+                        if el.is_visible():
+                            try: el.click(force=True,timeout=5000)
+                            except Exception: el.evaluate("(el)=>el.click()")
+                            return True
+                except Exception:
+                    pass
+
+            # Forgiving CSS candidates.
+            for sel in selectors:
+                try:
+                    q=ctx.locator(sel)
+                    for i in range(min(q.count(),30)):
+                        el=q.nth(i)
+                        if not el.is_visible(): continue
+                        txt=(el.inner_text() or "").strip()
+                        if name.lower() not in txt.lower() and name.lower() not in str(el.get_attribute("onclick") or "").lower():
+                            continue
+                        try: el.click(force=True,timeout=5000)
+                        except Exception: el.evaluate("(el)=>el.click()")
+                        return True
+                except Exception:
+                    pass
+
+        # Browse has historically exposed tabBrowseChange() even when the
+        # top menu text itself is not discoverable.
+        if name.lower()=="browse":
+            for ctx in contexts():
+                try:
+                    q=ctx.locator("[onclick*='tabBrowseChange' i]")
+                    for i in range(min(q.count(),20)):
+                        el=q.nth(i)
+                        if el.is_visible():
+                            el.evaluate("(el)=>el.click()")
+                            return True
+                except Exception:
+                    pass
+        return False
+
+    if try_click():
+        page.wait_for_timeout(900)
+        return
+
+    # Some TPN sessions land on a child/blank page after authentication.
+    # Return to the known Dashboard URL and try the navigation again.
+    try:
+        base=os.getenv("TPN_LOGIN_URL","https://pilot.tpnconnect.com/").rstrip("/")
+        page.goto(base+"/Dashboard",wait_until="domcontentloaded",timeout=30000)
+        page.wait_for_timeout(1200)
+        if try_click():
+            page.wait_for_timeout(900)
+            return
+    except Exception:
+        pass
+
+    # Put actionable diagnostics directly into the Render log.
+    visible=[]
+    for ctx in contexts():
+        for sel in ("a","button","[role='menuitem']","[role='link']","[onclick]"):
             try:
-                count=min(loc.count(),8)
-                for i in range(count):
-                    item=loc.nth(i)
-                    if item.is_visible():
-                        try: item.click(timeout=12000,force=True)
-                        except Exception: item.evaluate("el=>el.click()")
-                        return
+                q=ctx.locator(sel)
+                for i in range(min(q.count(),80)):
+                    el=q.nth(i)
+                    if not el.is_visible(): continue
+                    txt=" ".join((el.inner_text() or "").split())
+                    onclick=el.get_attribute("onclick")
+                    if txt or onclick:
+                        visible.append({"tag":sel,"text":txt[:100],"onclick":(onclick or "")[:120]})
             except Exception:
                 pass
+    try: current_url=page.url
+    except Exception: current_url="?"
+    try: title=page.title()
+    except Exception: title="?"
+    print(f"[collector] NAV DIAGNOSTIC url={current_url!r} title={title!r} visible={visible[:120]}",flush=True)
     raise RuntimeError(f"Could not find visible top navigation control: {name}")
 
 def fill_date(page, which, value):
