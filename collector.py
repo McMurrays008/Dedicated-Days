@@ -398,7 +398,23 @@ def export_browse(page,start,end,cb):
     search=None
     contexts=[page]+[f for f in page.frames if f is not page.main_frame]
     wanted=re.compile(r"^(browse|search|view|go|submit|load|find|refresh)$",re.I)
+    # Current Pilot Browse uses an unlabeled button whose action is fuzzySearch().
     for ctx in contexts:
+        try:
+            q=ctx.locator("[onclick*='fuzzySearch' i]")
+            for i in range(min(q.count(),20)):
+                item=q.nth(i)
+                if item.is_visible():
+                    search=item
+                    break
+        except Exception:
+            pass
+        if search:
+            break
+
+    for ctx in contexts:
+        if search:
+            break
         for sel in ("input[type='submit']","button[type='submit']","input[type='button']",
                     "input","button","[onclick]"):
             try:
