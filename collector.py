@@ -475,7 +475,89 @@ def export_browse(page,start,end,cb):
         except Exception: search.evaluate("el=>el.click()")
         page.wait_for_timeout(1400)
     target=DOWNLOAD_DIR/f"RAW_TPN_Dedicated_Day_Browse_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    return click_export(page,r"Export\s*To\s*Excel",target,cb)
+    stage(cb,f"Downloading {target.name}")
+
+    # Browse's "Export To Excel" text can sit inside a non-clickable wrapper.
+    # Find the actual actionable element across the page/frames and prefer
+    # href/onclick/button controls over a plain text container.
+    export=None
+    export_context=None
+    export_rx=re.compile(r"Export\s*To\s*Excel",re.I)
+    for ctx in contexts:
+        for sel in ("a","button","input[type='button']","input[type='submit']","[onclick]"):
+            try:
+                q=ctx.locator(sel)
+                for i in range(min(q.count(),120)):
+                    el=q.nth(i)
+                    if not el.is_visible(): continue
+                    label=" ".join(((el.inner_text() or "")+" "+(el.get_attribute("value") or "")+" "+(el.get_attribute("aria-label") or "")).split())
+                    if export_rx.search(label):
+                        export=el; export_context=ctx; break
+            except Exception:
+                pass
+            if export: break
+        if export: break
+
+    # If only the text node is discoverable, walk up to its nearest clickable
+    # ancestor instead of clicking the wrapper itself.
+    if not export:
+        for ctx in contexts:
+            try:
+                q=ctx.get_by_text(export_rx)
+                for i in range(min(q.count(),20)):
+                    el=q.nth(i)
+                    if not el.is_visible(): continue
+                    clickable=el.locator("xpath=ancestor-or-self::*[self::a or self::button or @onclick][1]")
+                    if clickable.count() and clickable.first.is_visible():
+                        export=clickable.first; export_context=ctx; break
+            except Exception:
+                pass
+            if export: break
+
+    if not export:
+        found=[]
+        for ctx in contexts:
+            for sel in ("a","button","input","[onclick]"):
+                try:
+                    q=ctx.locator(sel)
+                    for i in range(min(q.count(),120)):
+                        el=q.nth(i)
+                        if not el.is_visible(): continue
+                        found.append({"tag":sel,
+                                      "text":" ".join((el.inner_text() or "").split())[:100],
+                                      "value":el.get_attribute("value"),
+                                      "href":el.get_attribute("href"),
+                                      "onclick":(el.get_attribute("onclick") or "")[:160]})
+                except Exception: pass
+        print(f"[collector] BROWSE EXPORT DIAGNOSTIC visible={found[:180]}",flush=True)
+        raise RuntimeError("Could not find actionable Browse Export To Excel control")
+
+    print(f"[collector] Browse export control href={export.get_attribute('href')!r} onclick={export.get_attribute('onclick')!r}",flush=True)
+    try:
+        with page.expect_download(timeout=120000) as di:
+            try: export.click(timeout=15000,force=True,no_wait_after=True)
+            except Exception: export.evaluate("el=>el.click()")
+        di.value.save_as(target)
+        return target
+    except Exception:
+        # Log the exact export-area controls if TPN did not emit a browser
+        # download event, so the next correction is based on the real action.
+        found=[]
+        for ctx in contexts:
+            for sel in ("a","button","input","[onclick]"):
+                try:
+                    q=ctx.locator(sel)
+                    for i in range(min(q.count(),120)):
+                        el=q.nth(i)
+                        if not el.is_visible(): continue
+                        label=" ".join(((el.inner_text() or "")+" "+(el.get_attribute("value") or "")).split())
+                        if "export" in label.lower() or "excel" in label.lower() or "export" in (el.get_attribute("onclick") or "").lower():
+                            found.append({"tag":sel,"text":label[:120],
+                                          "href":el.get_attribute("href"),
+                                          "onclick":(el.get_attribute("onclick") or "")[:200]})
+                except Exception: pass
+        print(f"[collector] BROWSE EXPORT DIAGNOSTIC controls={found[:100]}",flush=True)
+        raise
 
 def read_csv(path):
     raw=Path(path).read_bytes()
