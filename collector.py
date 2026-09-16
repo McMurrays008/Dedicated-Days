@@ -833,13 +833,30 @@ def status_refresh(stage_callback=None):
     if not current.get("rows"):
         raise RuntimeError("The morning import contains no deliveries.")
 
+    # A status refresh must always belong to TODAY'S manually imported
+    # population. Never let an old JSON file (for example one restored during
+    # a Render deploy) silently drive the Browse date range.
+    today=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).date()
     try:
-        target=datetime.strptime(current["delivery_date"],"%Y-%m-%d").date()
+        population_date=datetime.strptime(current["delivery_date"],"%Y-%m-%d").date()
     except Exception:
         raise RuntimeError("The current dashboard has no valid delivery_date.")
 
-    # Search Browse for the fixed delivery day only. This refresh is status-only:
-    # it cannot add or remove deliveries from the morning population.
+    if population_date != today:
+        raise RuntimeError(
+            f"Morning population is for {population_date.strftime('%d/%m/%Y')}, "
+            f"not today {today.strftime('%d/%m/%Y')}. "
+            "Please import today's TPN Dedicated Day Check before updating statuses."
+        )
+
+    target=today
+    print(
+        f"[collector] Status target confirmed from today's morning population: {dtxt(target)}",
+        flush=True,
+    )
+
+    # Browse searches seven PREVIOUS working days plus today. The resulting
+    # workbook is used only to update Status for the fixed morning Dockets.
     stage(stage_callback,f"Refreshing Browse statuses for {dtxt(target)}")
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=os.getenv("HEADLESS","true").lower()=="true",
