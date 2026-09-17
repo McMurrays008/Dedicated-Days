@@ -194,12 +194,9 @@ def click_top_nav(page, name):
     raise RuntimeError(f"Could not find visible top navigation control: {name}")
 
 def fill_date(page, which, value):
-    """Find TPN date fields across the main page and child frames.
-
-    Pilot TPN Browse does not consistently use the DateFrom/DateTo names used
-    on Integration, so this also recognises labels, ids/names containing
-    from/to + date, and the first input following a visible Date From/To label.
-    """
+    """Set a visible TPN date control without waiting on Playwright's
+    editability checks. TPN's Browse date widgets are JavaScript-driven and
+    can appear readonly even though the browser UI accepts a date."""
     want_from="from" in which.lower()
     stem="DateFrom" if want_from else "DateTo"
     word="from" if want_from else "to"
@@ -220,40 +217,41 @@ def fill_date(page, which, value):
     loc=None
     for ctx in contexts:
         loc=first_visible(ctx,selectors)
-        if loc: break
-
-        # Accessible labels, where present.
+        if loc:
+            break
         try:
             q=ctx.get_by_label(re.compile(rf"Date\s*{word}",re.I))
-            for i in range(q.count()):
+            for i in range(min(q.count(),10)):
                 if q.nth(i).is_visible():
-                    loc=q.nth(i); break
+                    loc=q.nth(i)
+                    break
         except Exception:
             pass
-        if loc: break
-
-        # TPN/Kendo pages sometimes render a plain text label with an
-        # unlabelled input immediately after it.
+        if loc:
+            break
         try:
             labels=ctx.get_by_text(re.compile(rf"^\s*Date\s*{word}\s*:?\s*$",re.I))
             for i in range(min(labels.count(),10)):
                 lab=labels.nth(i)
-                if not lab.is_visible(): continue
+                if not lab.is_visible():
+                    continue
                 q=lab.locator("xpath=following::input[not(@type='hidden')][1]")
                 if q.count() and q.first.is_visible():
-                    loc=q.first; break
+                    loc=q.first
+                    break
         except Exception:
             pass
-        if loc: break
+        if loc:
+            break
 
     if not loc:
-        # Produce useful diagnostics in Render logs if TPN changes again.
         found=[]
         for ctx in contexts:
             try:
                 for i in range(min(ctx.locator("input").count(),40)):
                     el=ctx.locator("input").nth(i)
-                    if not el.is_visible(): continue
+                    if not el.is_visible():
+                        continue
                     found.append({
                         "name":el.get_attribute("name"),
                         "id":el.get_attribute("id"),
@@ -266,19 +264,36 @@ def fill_date(page, which, value):
         print(f"[collector] Visible inputs while looking for {which}: {found}",flush=True)
         raise RuntimeError(f"Could not identify {which} field")
 
-    # Kendo/date-picker inputs can be readonly or have JS handlers. Fill first;
-    # fall back to DOM value assignment plus input/change events.
-    try:
-        loc.fill(value,force=True)
-    except Exception:
-        loc.evaluate("""(el, value) => {
-            el.removeAttribute('readonly');
-            el.value=value;
-            el.dispatchEvent(new Event('input',{bubbles:true}));
-            el.dispatchEvent(new Event('change',{bubbles:true}));
-        }""",value)
-    try: loc.press("Tab")
-    except Exception: pass
+    print(f"[collector] Setting {which} to {value}",flush=True)
+
+    # Direct DOM assignment mirrors what the TPN date widget ultimately does,
+    # but avoids Playwright waiting indefinitely for the widget to be
+    # considered editable. Native input/change/blur events notify TPN's JS.
+    loc.evaluate("""(el, value) => {
+        try { el.focus(); } catch(e) {}
+        el.removeAttribute('readonly');
+        const proto = Object.getPrototypeOf(el);
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) desc.set.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        el.dispatchEvent(new Event('blur', {bubbles:true}));
+    }""", value)
+
+    # Verify immediately instead of silently waiting for minutes.
+    actual=(loc.input_value(timeout=5000) or "").strip()
+    print(f"[collector] {which} now reads {actual!r}",flush=True)
+    if actual != value:
+        # One short keyboard fallback for widgets that overwrite DOM assignment.
+        loc.click(force=True,timeout=5000)
+        loc.press("Control+A",timeout=5000)
+        loc.type(value,delay=25,timeout=5000)
+        loc.press("Tab",timeout=5000)
+        actual=(loc.input_value(timeout=5000) or "").strip()
+        print(f"[collector] {which} after keyboard fallback reads {actual!r}",flush=True)
+        if actual != value:
+            raise RuntimeError(f"{which} did not retain requested value {value}; field contains {actual}")
 
 def login(page, cb):
     username=os.getenv("TPN_USERNAME")
@@ -406,9 +421,11 @@ def export_browse(page,start,end,cb):
         "(7 previous working days + target day)",
         flush=True,
     )
+    stage(cb,"Setting Browse Date From")
     fill_date(page,"Date From",dtxt(browse_start))
+    stage(cb,"Setting Browse Date To")
     fill_date(page,"Date To",dtxt(browse_end))
-    stage(cb,"Loading Browse results")
+    stage(cb,"Browse dates confirmed; loading results")
 
     # Pilot TPN has used different labels/types for the content-area submit
     # control. Search all frames, excluding the top-nav tabBrowseChange control.
