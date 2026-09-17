@@ -505,9 +505,99 @@ def export_browse(page,start,end,cb):
         raise RuntimeError("Could not find Browse results/search button")
 
     if search is not True:
-        try: search.click(timeout=15000,force=True)
-        except Exception: search.evaluate("el=>el.click()")
-        page.wait_for_timeout(1400)
+        stage(cb,"Running Browse search")
+        try:
+            search.click(timeout=15000,force=True)
+        except Exception:
+            search.evaluate("el=>el.click()")
+
+    # Do not export immediately. TPN renders the Browse grid asynchronously;
+    # the Export control can be visible before the result rows have arrived,
+    # which produces an XLSX containing only the "Docket" heading.
+    stage(cb,"Waiting for Browse result rows")
+    print("[collector] Browse search submitted; waiting for populated results grid",flush=True)
+
+    grid_probe = """() => {
+        const visible = el => {
+            const s=getComputedStyle(el), r=el.getBoundingClientRect();
+            return s.display!=='none' && s.visibility!=='hidden' && r.width>0 && r.height>0;
+        };
+        const selectors=[
+            "table tbody tr",
+            ".k-grid-content tr",
+            ".ui-jqgrid-btable tr",
+            "[role='row']",
+            "[class*='grid' i] tr",
+            "[class*='result' i] tr"
+        ];
+        let rows=[];
+        for (const sel of selectors) {
+            for (const el of document.querySelectorAll(sel)) {
+                if (!visible(el)) continue;
+                const t=(el.innerText||'').replace(/\\s+/g,' ').trim();
+                if (t) rows.push(t);
+            }
+        }
+        rows=[...new Set(rows)];
+        const dataRows=rows.filter(t => {
+            const x=t.toLowerCase();
+            return x!=='docket' &&
+                   !(/^docket\\b/.test(x) && x.length < 80) &&
+                   !x.includes('no records') &&
+                   !x.includes('no results');
+        });
+        const body=(document.body.innerText||'').toLowerCase();
+        return {
+            rowCount:dataRows.length,
+            sample:dataRows.slice(0,3),
+            noResults:body.includes('no records') || body.includes('no results found')
+        };
+    }"""
+
+    ready=None
+    for second in range(90):
+        best={"rowCount":0,"sample":[],"noResults":False}
+        for ctx in contexts:
+            try:
+                probe=ctx.evaluate(grid_probe)
+                if probe and probe.get("rowCount",0) > best["rowCount"]:
+                    best=probe
+                if probe and probe.get("noResults"):
+                    best["noResults"]=True
+            except Exception:
+                pass
+        if best["rowCount"] > 0:
+            ready=best
+            print(f"[collector] Browse results populated: rows_detected={best['rowCount']} sample={best['sample']}",flush=True)
+            break
+        if best["noResults"] and second >= 5:
+            raise RuntimeError(
+                f"TPN Browse reported no results for {dtxt(browse_start)} to {dtxt(browse_end)}"
+            )
+        if second in (9,29,59):
+            print(f"[collector] Still waiting for Browse result rows ({second+1}s)",flush=True)
+        page.wait_for_timeout(1000)
+
+    if not ready:
+        # Capture enough DOM information to diagnose the grid without
+        # downloading another misleading header-only workbook.
+        diag=[]
+        for ctx in contexts:
+            try:
+                diag.append(ctx.evaluate("""() => ({
+                    tables: document.querySelectorAll('table').length,
+                    trs: document.querySelectorAll('tr').length,
+                    roleRows: document.querySelectorAll('[role="row"]').length,
+                    text: (document.body.innerText||'').replace(/\\s+/g,' ').slice(0,1200)
+                })"""))
+            except Exception:
+                pass
+        print(f"[collector] BROWSE GRID DIAGNOSTIC {diag}",flush=True)
+        raise RuntimeError(
+            "Browse search did not populate result rows within 90 seconds; "
+            "Excel export was not attempted."
+        )
+
     target=DOWNLOAD_DIR/f"RAW_TPN_Dedicated_Day_Browse_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     stage(cb,f"Downloading {target.name}")
 
