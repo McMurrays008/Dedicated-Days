@@ -779,11 +779,42 @@ def full_refresh(stage_callback=None):
     stage(stage_callback,f"Using date range {dtxt(start)} to {dtxt(end)}")
     integration_path=browse_path=None
     with sync_playwright() as p:
-        browser=p.chromium.launch(headless=os.getenv("HEADLESS","true").lower()=="true",
-            args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-extensions","--renderer-process-limit=1"])
-        context=browser.new_context(accept_downloads=True,viewport={"width":1100,"height":760})
+        browser=p.chromium.launch(
+            headless=os.getenv("HEADLESS","true").lower()=="true",
+            args=[
+                "--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage",
+                "--disable-gpu","--disable-extensions","--renderer-process-limit=1",
+                "--disable-background-networking","--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows","--disable-breakpad",
+                "--disable-component-update","--disable-default-apps",
+                "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter",
+                "--disable-hang-monitor","--disable-ipc-flooding-protection",
+                "--disable-notifications","--disable-popup-blocking","--disable-sync",
+                "--metrics-recording-only","--no-first-run","--no-default-browser-check",
+                "--mute-audio"
+            ],
+        )
+        context=browser.new_context(
+            accept_downloads=True,
+            viewport={"width":900,"height":650},
+            service_workers="block",
+        )
         page=context.new_page()
-        page.route("**/*",lambda route: route.abort() if route.request.resource_type in {"image","media","font"} else route.continue_())
+
+        # Keep the Render Free instance light: TPN's Browse workflow needs
+        # HTML/CSS/JS/XHR, but not images, fonts, media or tracking/beacon traffic.
+        def light_route(route):
+            req=route.request
+            if req.resource_type in {"image","media","font"}:
+                return route.abort()
+            url=req.url.lower()
+            if any(x in url for x in (
+                "google-analytics","googletagmanager","doubleclick",
+                "clarity.ms","hotjar","facebook.net"
+            )):
+                return route.abort()
+            return route.continue_()
+        page.route("**/*",light_route)
         page.set_default_timeout(15000)
         try:
             login(page,stage_callback)
@@ -796,7 +827,19 @@ def full_refresh(stage_callback=None):
             except Exception: pass
             raise
         finally:
-            context.close(); browser.close(); gc.collect()
+            try:
+                page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+            gc.collect()
 
     stage(stage_callback,"Filtering exports locally")
     integration=filter_integration(read_csv(integration_path))
@@ -833,20 +876,68 @@ def status_refresh(stage_callback=None):
     if not current.get("rows"):
         raise RuntimeError("The morning import contains no deliveries.")
 
+    # A status refresh must always belong to TODAY'S manually imported
+    # population. Never let an old JSON file (for example one restored during
+    # a Render deploy) silently drive the Browse date range.
+    today=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).date()
     try:
-        target=datetime.strptime(current["delivery_date"],"%Y-%m-%d").date()
+        population_date=datetime.strptime(current["delivery_date"],"%Y-%m-%d").date()
     except Exception:
         raise RuntimeError("The current dashboard has no valid delivery_date.")
 
-    # Search Browse for the fixed delivery day only. This refresh is status-only:
-    # it cannot add or remove deliveries from the morning population.
+    if population_date != today:
+        raise RuntimeError(
+            f"Morning population is for {population_date.strftime('%d/%m/%Y')}, "
+            f"not today {today.strftime('%d/%m/%Y')}. "
+            "Please import today's TPN Dedicated Day Check before updating statuses."
+        )
+
+    target=today
+    print(
+        f"[collector] Status target confirmed from today's morning population: {dtxt(target)}",
+        flush=True,
+    )
+
+    # Browse searches seven PREVIOUS working days plus today. The resulting
+    # workbook is used only to update Status for the fixed morning Dockets.
     stage(stage_callback,f"Refreshing Browse statuses for {dtxt(target)}")
     with sync_playwright() as p:
-        browser=p.chromium.launch(headless=os.getenv("HEADLESS","true").lower()=="true",
-            args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu","--disable-extensions","--renderer-process-limit=1"])
-        context=browser.new_context(accept_downloads=True,viewport={"width":1100,"height":760})
+        browser=p.chromium.launch(
+            headless=os.getenv("HEADLESS","true").lower()=="true",
+            args=[
+                "--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage",
+                "--disable-gpu","--disable-extensions","--renderer-process-limit=1",
+                "--disable-background-networking","--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows","--disable-breakpad",
+                "--disable-component-update","--disable-default-apps",
+                "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter",
+                "--disable-hang-monitor","--disable-ipc-flooding-protection",
+                "--disable-notifications","--disable-popup-blocking","--disable-sync",
+                "--metrics-recording-only","--no-first-run","--no-default-browser-check",
+                "--mute-audio"
+            ],
+        )
+        context=browser.new_context(
+            accept_downloads=True,
+            viewport={"width":900,"height":650},
+            service_workers="block",
+        )
         page=context.new_page()
-        page.route("**/*",lambda route: route.abort() if route.request.resource_type in {"image","media","font"} else route.continue_())
+
+        # Keep the Render Free instance light: TPN's Browse workflow needs
+        # HTML/CSS/JS/XHR, but not images, fonts, media or tracking/beacon traffic.
+        def light_route(route):
+            req=route.request
+            if req.resource_type in {"image","media","font"}:
+                return route.abort()
+            url=req.url.lower()
+            if any(x in url for x in (
+                "google-analytics","googletagmanager","doubleclick",
+                "clarity.ms","hotjar","facebook.net"
+            )):
+                return route.abort()
+            return route.continue_()
+        page.route("**/*",light_route)
         page.set_default_timeout(15000)
         try:
             login(page,stage_callback)
@@ -858,7 +949,19 @@ def status_refresh(stage_callback=None):
             except Exception: pass
             raise
         finally:
-            context.close(); browser.close(); gc.collect()
+            try:
+                page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+            gc.collect()
 
     stage(stage_callback,"Matching Browse statuses to morning Dockets")
     browse=filter_browse(read_xlsx(browse_path))
