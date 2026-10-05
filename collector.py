@@ -976,6 +976,64 @@ def full_refresh(stage_callback=None):
     stage(stage_callback,f"Completed full refresh: {len(rows)} deliveries; {matched} statuses matched")
     return payload["source"] | {"delivery_date":payload["delivery_date"],"rows":len(rows)}
 
+
+def status_refresh_from_file(status_path, stage_callback=None):
+    """Update Status only for the fixed morning population using a supplied
+    Browse Export / ConsignmentExport file. This is the cloud/OneDrive path:
+    it never adds or removes deliveries.
+    """
+    if not DATA_FILE.exists():
+        raise RuntimeError("No morning Dedicated Day Check has been imported yet.")
+    current=json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    if not current.get("rows"):
+        raise RuntimeError("The morning import contains no deliveries.")
+
+    today=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).date()
+    try:
+        population_date=datetime.strptime(current["delivery_date"],"%Y-%m-%d").date()
+    except Exception:
+        raise RuntimeError("The current dashboard has no valid delivery_date.")
+
+    if population_date != today:
+        raise RuntimeError(
+            f"Morning population is for {population_date.strftime('%d/%m/%Y')}, "
+            f"not today {today.strftime('%d/%m/%Y')}."
+        )
+
+    stage(stage_callback,"Reading supplied Browse status export")
+    path=Path(status_path)
+    if path.suffix.lower()==".csv":
+        source_rows=read_csv(path)
+    else:
+        source_rows=read_xlsx(path)
+
+    latest={}
+    for r in source_rows:
+        docket=norm_docket(first(r,"Docket","Docket No","Docket Number","Consignment","Consignment Number"))
+        if docket:
+            latest[docket]=norm(first(r,"STATUS","Status","Status Code"))
+
+    changed=matched=0
+    for r in current["rows"]:
+        d=norm_docket(r.get("Docket"))
+        if d in latest and latest[d]:
+            matched+=1
+            if latest[d] != norm(r.get("Status")):
+                r["Status"]=latest[d]
+                changed+=1
+
+    current["generated_at"]=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).isoformat(timespec="seconds")
+    current["mode"]="status_file"
+    current["status_refresh"]={
+        "matched_dockets":matched,
+        "changed_statuses":changed,
+        "source":path.name,
+        "delivery_date":today.isoformat()
+    }
+    atomic_write(current)
+    stage(stage_callback,f"Completed supplied-file status refresh: {matched} matched; {changed} changed")
+    return current["status_refresh"]
+
 def status_refresh(stage_callback=None):
     if not DATA_FILE.exists():
         raise RuntimeError("No morning Dedicated Day Check has been imported yet.")
