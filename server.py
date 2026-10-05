@@ -13,6 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from collector import full_refresh, status_refresh, manual_morning_import
+from onedrive_sync import sync_from_onedrive
 
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
@@ -75,7 +76,14 @@ def run_job(mode):
             save_status()
             print(f"[server] {mode}: {name}", flush=True)
 
-        result = full_refresh(cb) if mode == "full" else status_refresh(cb)
+        if mode == "full":
+            result = full_refresh(cb)
+        elif mode == "status":
+            result = status_refresh(cb)
+        elif mode == "onedrive":
+            result = sync_from_onedrive(cb)
+        else:
+            raise RuntimeError(f"Unknown refresh mode: {mode}")
         status.update(
             last_success=datetime.now(TZ).isoformat(timespec="seconds"),
             last_error=None,
@@ -134,6 +142,8 @@ def health():
             "service": "tpn-dedicated-day",
             "status": status,
             "refresh_token_configured": bool(os.getenv("REFRESH_TOKEN")),
+            "onedrive_sync_enabled": os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true",
+            "onedrive_configured": all(bool(os.getenv(k)) for k in ("MS_TENANT_ID","MS_CLIENT_ID","MS_CLIENT_SECRET","ONEDRIVE_USER")),
         }
     )
 
@@ -145,8 +155,8 @@ def refresh(mode: str, x_refresh_token: str | None = Header(default=None)):
         raise HTTPException(503, "REFRESH_TOKEN is not configured in Render")
     if x_refresh_token != expected:
         raise HTTPException(401, "Invalid refresh token")
-    if mode not in {"full", "status"}:
-        raise HTTPException(400, "Mode must be full or status")
+    if mode not in {"full", "status", "onedrive"}:
+        raise HTTPException(400, "Mode must be full, status or onedrive")
     if not start_background(mode):
         return JSONResponse(
             {"ok": False, "message": "Refresh already running"}, status_code=409
@@ -218,6 +228,7 @@ pre{{background:#f4f7fb;padding:16px;border-radius:8px;overflow:auto}}
       </div>
       <button onclick="uploadMorning()">Import Morning Check</button>
       <button class="secondary" onclick="runRefresh('status')">Update Status Now</button>
+      <button class="secondary" onclick="runRefresh('onedrive')">Sync OneDrive Now</button>
     </div>
     <p class="muted">Import the morning Dedicated Day Check once. That fixes the day's delivery population. Status refreshes only update those Dockets; they do not add or remove deliveries.</p>
     <div id="result">Ready.</div>
@@ -230,9 +241,9 @@ pre{{background:#f4f7fb;padding:16px;border-radius:8px;overflow:auto}}
 
   <div class="card">
     <h2>Schedule</h2>
-    <p>Morning population: <strong>manual import at about 09:30 Europe/London</strong>.</p>
-    <p>Automatic Browse status refreshes: <strong>10:00, 12:00, 14:00, 16:00, 18:00 Europe/London</strong>.</p>
-    <p>Dashboard checks its JSON every 5 minutes.</p>
+    <p>Cloud mode: <strong>OneDrive sync every hour from 08:00 through 17:00 Europe/London</strong>.</p>
+    <p>Each cloud run re-reads the latest morning TPN Dedicated Day Check and latest Browse Export / ConsignmentExport from the Dedicated Days OneDrive folder.</p>
+    <p>Status matching only updates Dockets from today's fixed morning population. Dashboard checks its JSON every 5 minutes.</p>
   </div>
 </div>
 <script>
@@ -297,13 +308,18 @@ setInterval(loadStatus, 5000);
 
 
 scheduler = BackgroundScheduler(timezone=TZ)
-for h in (10, 12, 14, 16, 18):
+
+def scheduled_onedrive_sync():
+    if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
+        start_background("onedrive")
+
+for h in range(8, 18):
     scheduler.add_job(
-        lambda: start_background("status"),
+        scheduled_onedrive_sync,
         "cron",
         hour=h,
         minute=0,
-        id=f"status_{h:02d}00",
+        id=f"onedrive_{h:02d}00",
         replace_existing=True,
     )
 scheduler.start()
