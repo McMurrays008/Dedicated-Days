@@ -102,45 +102,115 @@ def _download_with_browser(shared_url: str, target: Path) -> Path:
                     return target
                 page.wait_for_timeout(500)
 
-            candidates=[
-                page.get_by_role("button",name=re.compile(r"download",re.I)),
-                page.get_by_role("link",name=re.compile(r"download",re.I)),
-                page.get_by_text(re.compile(r"^\s*download\s*$",re.I)),
-                page.locator("a[download]"),
-                page.locator("[aria-label*='Download' i]"),
-                page.locator("[title*='Download' i]"),
-            ]
-            clicked=False
-            for loc in candidates:
+            def wait_for_download(seconds=12):
+                loops=max(1,int(seconds*2))
+                for _ in range(loops):
+                    if download_holder["download"] is not None:
+                        download_holder["download"].save_as(target)
+                        return True
+                    page.wait_for_timeout(500)
+                return False
+
+            # Once the anonymous-share page has established its cookies/session,
+            # try its current URL with download=1 inside the same browser context.
+            try:
+                current=page.url
+                parts=urllib.parse.urlsplit(current)
+                q=urllib.parse.parse_qsl(parts.query,keep_blank_values=True)
+                q=[(k,v) for k,v in q if k.lower()!="download"]
+                q.append(("download","1"))
+                forced=urllib.parse.urlunsplit((parts.scheme,parts.netloc,parts.path,urllib.parse.urlencode(q),parts.fragment))
                 try:
-                    for i in range(min(loc.count(),20)):
-                        el=loc.nth(i)
-                        if not el.is_visible():
-                            continue
-                        try:
-                            el.click(timeout=8000)
-                        except Exception:
-                            el.evaluate("(el)=>el.click()")
-                        clicked=True
-                        break
+                    page.goto(forced,wait_until="domcontentloaded",timeout=30000)
                 except Exception:
                     pass
-                if clicked:
-                    break
-
-            if not clicked:
-                raise RuntimeError(
-                    "Could not find a Download control on the anonymous SharePoint page. "
-                    "Use the original Anyone-with-the-link URL, not an Office Doc.aspx URL."
-                )
-
-            for _ in range(120):
-                if download_holder["download"] is not None:
-                    download_holder["download"].save_as(target)
+                if wait_for_download(8):
                     return target
-                page.wait_for_timeout(500)
+            except Exception:
+                pass
 
-            raise RuntimeError("SharePoint Download was clicked but no file download was received.")
+            def click_download():
+                candidates=[
+                    page.get_by_role("button",name=re.compile(r"download",re.I)),
+                    page.get_by_role("link",name=re.compile(r"download",re.I)),
+                    page.get_by_role("menuitem",name=re.compile(r"download",re.I)),
+                    page.get_by_text(re.compile(r"^\s*download\s*$",re.I)),
+                    page.locator("a[download]"),
+                    page.locator("[aria-label*='Download' i]"),
+                    page.locator("[title*='Download' i]"),
+                    page.locator("[data-automationid*='download' i]"),
+                    page.locator("[data-testid*='download' i]"),
+                ]
+                for loc in candidates:
+                    try:
+                        for i in range(min(loc.count(),30)):
+                            el=loc.nth(i)
+                            if not el.is_visible():
+                                continue
+                            try:
+                                el.click(timeout=8000)
+                            except Exception:
+                                el.evaluate("(el)=>el.click()")
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+            clicked=click_download()
+
+            # Microsoft sometimes hides Download under a More / ellipsis menu.
+            if not clicked:
+                more_candidates=[
+                    page.get_by_role("button",name=re.compile(r"(more|more options|see more)",re.I)),
+                    page.locator("[aria-label*='More' i]"),
+                    page.locator("[title*='More' i]"),
+                    page.locator("button:has-text('...')"),
+                    page.locator("[data-automationid*='more' i]"),
+                ]
+                for loc in more_candidates:
+                    try:
+                        for i in range(min(loc.count(),20)):
+                            el=loc.nth(i)
+                            if not el.is_visible():
+                                continue
+                            try:
+                                el.click(timeout=5000)
+                            except Exception:
+                                el.evaluate("(el)=>el.click()")
+                            page.wait_for_timeout(750)
+                            if click_download():
+                                clicked=True
+                                break
+                    except Exception:
+                        pass
+                    if clicked:
+                        break
+
+            if clicked and wait_for_download(45):
+                return target
+
+            # Put useful diagnostics in Render logs if Microsoft changes the UI.
+            visible=[]
+            for sel in ("button","a","[role='menuitem']","[aria-label]","[title]"):
+                try:
+                    q=page.locator(sel)
+                    for i in range(min(q.count(),80)):
+                        el=q.nth(i)
+                        if not el.is_visible():
+                            continue
+                        visible.append({
+                            "tag":sel,
+                            "text":" ".join((el.inner_text() or "").split())[:100],
+                            "aria":(el.get_attribute("aria-label") or "")[:100],
+                            "title":(el.get_attribute("title") or "")[:100],
+                        })
+                except Exception:
+                    pass
+            print(f"[onedrive] SHAREPOINT UI DIAGNOSTIC url={page.url!r} visible={visible[:120]}",flush=True)
+            raise RuntimeError(
+                "Could not download the anonymous SharePoint file after trying the page, "
+                "download=1 in-session, and the More/Download menus."
+            )
         finally:
             try: page.remove_listener("download",got_download)
             except Exception: pass
