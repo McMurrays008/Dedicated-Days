@@ -9,10 +9,10 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, UploadFile, File
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from collector import full_refresh, status_refresh, manual_morning_import
+from collector import full_refresh, status_refresh, manual_morning_import, status_refresh_from_file
 from onedrive_sync import sync_from_onedrive
 
 HERE = Path(__file__).resolve().parent
@@ -185,6 +185,78 @@ async def morning_import(file: UploadFile = File(...), x_refresh_token: str | No
         status.update(last_error=f"{type(e).__name__}: {e}",stage="Morning import failed")
         save_status()
         raise HTTPException(500,str(e))
+
+
+@app.post("/power-automate/morning")
+async def power_automate_morning(
+    request: Request,
+    x_refresh_token: str | None = Header(default=None),
+    x_file_name: str | None = Header(default=None),
+):
+    """Accept the morning workbook directly from a Power Automate HTTP action."""
+    expected=os.getenv("REFRESH_TOKEN")
+    if not expected:
+        raise HTTPException(503,"REFRESH_TOKEN is not configured in Render")
+    if x_refresh_token != expected:
+        raise HTTPException(401,"Invalid refresh token")
+    name=(x_file_name or "TPN Dedicated Day Check.xlsx").strip()
+    if not name.lower().endswith(".xlsx"):
+        raise HTTPException(400,"Morning file must be .xlsx")
+    target=HERE/"power-automate-morning.xlsx"
+    body=await request.body()
+    if not body:
+        raise HTTPException(400,"Morning request body was empty")
+    target.write_bytes(body)
+    try:
+        result=manual_morning_import(target)
+        status.update(
+            last_success=datetime.now(TZ).isoformat(timespec="seconds"),
+            last_error=None,
+            stage="Power Automate morning import completed",
+        )
+        save_status()
+        return {"ok":True,"result":result}
+    except Exception as e:
+        status.update(last_error=f"{type(e).__name__}: {e}",stage="Power Automate morning import failed")
+        save_status()
+        raise HTTPException(500,str(e))
+
+
+@app.post("/power-automate/status")
+async def power_automate_status(
+    request: Request,
+    x_refresh_token: str | None = Header(default=None),
+    x_file_name: str | None = Header(default=None),
+):
+    """Accept the latest Browse Export directly from Power Automate."""
+    expected=os.getenv("REFRESH_TOKEN")
+    if not expected:
+        raise HTTPException(503,"REFRESH_TOKEN is not configured in Render")
+    if x_refresh_token != expected:
+        raise HTTPException(401,"Invalid refresh token")
+    name=(x_file_name or "Browse Export.csv").strip()
+    suffix=Path(name).suffix.lower()
+    if suffix not in {".csv",".xlsx"}:
+        raise HTTPException(400,"Status file must be .csv or .xlsx")
+    target=HERE/("power-automate-status"+suffix)
+    body=await request.body()
+    if not body:
+        raise HTTPException(400,"Status request body was empty")
+    target.write_bytes(body)
+    try:
+        result=status_refresh_from_file(target)
+        status.update(
+            last_success=datetime.now(TZ).isoformat(timespec="seconds"),
+            last_error=None,
+            stage="Power Automate status import completed",
+        )
+        save_status()
+        return {"ok":True,"result":result}
+    except Exception as e:
+        status.update(last_error=f"{type(e).__name__}: {e}",stage="Power Automate status import failed")
+        save_status()
+        raise HTTPException(500,str(e))
+
 
 @app.get("/admin")
 def admin():
