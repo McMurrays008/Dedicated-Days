@@ -143,7 +143,7 @@ def health():
             "status": status,
             "refresh_token_configured": bool(os.getenv("REFRESH_TOKEN")),
             "onedrive_sync_enabled": os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true",
-            "onedrive_configured": all(bool(os.getenv(k)) for k in ("MS_TENANT_ID","MS_CLIENT_ID","MS_CLIENT_SECRET","ONEDRIVE_USER")),
+            "onedrive_configured": all(bool(os.getenv(k)) for k in ("ONEDRIVE_MORNING_URL","ONEDRIVE_STATUS_URL")),
         }
     )
 
