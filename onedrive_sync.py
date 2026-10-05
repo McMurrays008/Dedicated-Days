@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from playwright.sync_api import sync_playwright
 from collector import manual_morning_import, status_refresh_from_file
 
 HERE = Path(__file__).resolve().parent
@@ -55,6 +56,101 @@ def _fetch_bytes(url: str) -> tuple[bytes, str, str]:
             (resp.headers.get("Content-Type") or "").lower(),
             resp.geturl(),
         )
+
+
+def _download_with_browser(shared_url: str, target: Path) -> Path:
+    """Download an anonymously shared SharePoint/OneDrive file the same way a browser user does."""
+    with sync_playwright() as p:
+        browser=p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage",
+                "--disable-gpu","--disable-extensions","--renderer-process-limit=1",
+                "--disable-background-networking","--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows","--disable-breakpad",
+                "--disable-component-update","--disable-default-apps",
+                "--disable-notifications","--disable-sync","--no-first-run",
+                "--no-default-browser-check","--mute-audio"
+            ],
+        )
+        context=browser.new_context(
+            accept_downloads=True,
+            viewport={"width":1100,"height":760},
+            service_workers="block",
+        )
+        page=context.new_page()
+        page.set_default_timeout(20000)
+
+        download_holder={"download":None}
+
+        def got_download(d):
+            download_holder["download"]=d
+
+        page.on("download",got_download)
+        try:
+            try:
+                page.goto(shared_url,wait_until="domcontentloaded",timeout=45000)
+            except Exception as e:
+                # A direct download URL can cause navigation to abort because a
+                # download starts immediately; keep going if a download event fired.
+                if download_holder["download"] is None:
+                    print(f"[onedrive] Browser navigation note: {e}",flush=True)
+
+            for _ in range(20):
+                if download_holder["download"] is not None:
+                    download_holder["download"].save_as(target)
+                    return target
+                page.wait_for_timeout(500)
+
+            candidates=[
+                page.get_by_role("button",name=re.compile(r"download",re.I)),
+                page.get_by_role("link",name=re.compile(r"download",re.I)),
+                page.get_by_text(re.compile(r"^\s*download\s*$",re.I)),
+                page.locator("a[download]"),
+                page.locator("[aria-label*='Download' i]"),
+                page.locator("[title*='Download' i]"),
+            ]
+            clicked=False
+            for loc in candidates:
+                try:
+                    for i in range(min(loc.count(),20)):
+                        el=loc.nth(i)
+                        if not el.is_visible():
+                            continue
+                        try:
+                            el.click(timeout=8000)
+                        except Exception:
+                            el.evaluate("(el)=>el.click()")
+                        clicked=True
+                        break
+                except Exception:
+                    pass
+                if clicked:
+                    break
+
+            if not clicked:
+                raise RuntimeError(
+                    "Could not find a Download control on the anonymous SharePoint page. "
+                    "Use the original Anyone-with-the-link URL, not an Office Doc.aspx URL."
+                )
+
+            for _ in range(120):
+                if download_holder["download"] is not None:
+                    download_holder["download"].save_as(target)
+                    return target
+                page.wait_for_timeout(500)
+
+            raise RuntimeError("SharePoint Download was clicked but no file download was received.")
+        finally:
+            try: page.remove_listener("download",got_download)
+            except Exception: pass
+            try: page.close()
+            except Exception: pass
+            try: context.close()
+            except Exception: pass
+            try: browser.close()
+            except Exception: pass
+
 
 
 def _extract_download_url(page_html: str, base_url: str) -> str | None:
@@ -113,17 +209,13 @@ def _download(shared_url: str, target: Path, expected: str) -> Path:
 
     if expected == "xlsx":
         if not body.startswith(b"PK"):
-            raise RuntimeError(
-                "Morning OneDrive link still returned a SharePoint web page instead of the Excel workbook. "
-                "Please use the file's direct Download link rather than the normal sharing link."
-            )
+            print("[onedrive] HTTP route returned SharePoint HTML; trying browser download",flush=True)
+            return _download_with_browser(shared_url,target)
     elif expected == "csv":
         head = body[:1000].decode("utf-8", errors="replace").lower()
         if "text/html" in content_type or "<html" in head or "<!doctype" in head:
-            raise RuntimeError(
-                "Status OneDrive link still returned a SharePoint web page instead of the CSV file. "
-                "Please use the file's direct Download link rather than the normal sharing link."
-            )
+            print("[onedrive] HTTP route returned SharePoint HTML; trying browser download",flush=True)
+            return _download_with_browser(shared_url,target)
 
     target.write_bytes(body)
     return target
