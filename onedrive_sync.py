@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import html
+import json
 import os
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -38,36 +41,88 @@ def _download_url(shared_url: str) -> str:
     )
 
 
-def _download(shared_url: str, target: Path, expected: str) -> Path:
-    url = _download_url(shared_url)
+def _fetch_bytes(url: str) -> tuple[bytes, str, str]:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
             "Accept": "*/*",
         },
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
-        body = resp.read()
-        content_type = (resp.headers.get("Content-Type") or "").lower()
+        return (
+            resp.read(),
+            (resp.headers.get("Content-Type") or "").lower(),
+            resp.geturl(),
+        )
+
+
+def _extract_download_url(page_html: str, base_url: str) -> str | None:
+    """Best-effort extraction of the real file URL from a SharePoint anonymous preview page."""
+    text = html.unescape(page_html)
+
+    # SharePoint/Office pages often carry the file URL in JSON-like boot data.
+    patterns = [
+        r'"downloadUrl"\s*:\s*"([^"]+)"',
+        r'"DownloadUrl"\s*:\s*"([^"]+)"',
+        r'"downloadURL"\s*:\s*"([^"]+)"',
+        r'"@microsoft\.graph\.downloadUrl"\s*:\s*"([^"]+)"',
+        r'"FileGetUrl"\s*:\s*"([^"]+)"',
+        r'"fileGetUrl"\s*:\s*"([^"]+)"',
+        r'href=["\']([^"\']+/_layouts/(?:15/)?download\.aspx[^"\']*)["\']',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.I)
+        if not m:
+            continue
+        raw = m.group(1)
+        # Decode common JSON escaping used in Microsoft boot payloads.
+        try:
+            raw = json.loads(f'"{raw}"')
+        except Exception:
+            raw = raw.replace("\\u0026", "&").replace("\\u003d", "=").replace("\\/", "/")
+        raw = html.unescape(raw)
+        if raw.startswith("//"):
+            raw = "https:" + raw
+        return urllib.parse.urljoin(base_url, raw)
+
+    # Last-resort search for an absolute URL containing download.aspx.
+    m = re.search(r'(https?://[^"\'<> ]+/_layouts/(?:15/)?download\.aspx[^"\'<> ]*)', text, flags=re.I)
+    if m:
+        return html.unescape(m.group(1).replace("\\u0026", "&").replace("\\/", "/"))
+    return None
+
+
+def _download(shared_url: str, target: Path, expected: str) -> Path:
+    # First try the normal SharePoint download switch.
+    url = _download_url(shared_url)
+    body, content_type, final_url = _fetch_bytes(url)
+
+    # Some modern anonymous SharePoint links still return an HTML preview page
+    # even with download=1. In that case, follow the real download URL embedded
+    # in the page boot data.
+    head = body[:1000].decode("utf-8", errors="replace").lower()
+    if "text/html" in content_type or "<html" in head or "<!doctype" in head:
+        page_html = body.decode("utf-8", errors="replace")
+        candidate = _extract_download_url(page_html, final_url)
+        if candidate:
+            body, content_type, final_url = _fetch_bytes(candidate)
 
     if not body:
         raise RuntimeError(f"{expected} download was empty")
 
     if expected == "xlsx":
         if not body.startswith(b"PK"):
-            sample = body[:200].decode("utf-8", errors="replace")
             raise RuntimeError(
-                "Morning OneDrive link did not return an Excel workbook. "
-                f"Content-Type={content_type!r}; response starts {sample!r}"
+                "Morning OneDrive link still returned a SharePoint web page instead of the Excel workbook. "
+                "Please use the file's direct Download link rather than the normal sharing link."
             )
     elif expected == "csv":
-        # A CSV should be plain text, not the OneDrive/SharePoint HTML preview page.
-        head = body[:500].decode("utf-8", errors="replace").lower()
-        if "<html" in head or "<!doctype" in head:
+        head = body[:1000].decode("utf-8", errors="replace").lower()
+        if "text/html" in content_type or "<html" in head or "<!doctype" in head:
             raise RuntimeError(
-                "Status OneDrive link returned a web page instead of the CSV file. "
-                "Check that the link is set to Anyone with the link / Can view."
+                "Status OneDrive link still returned a SharePoint web page instead of the CSV file. "
+                "Please use the file's direct Download link rather than the normal sharing link."
             )
 
     target.write_bytes(body)
