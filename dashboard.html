@@ -106,6 +106,13 @@ function ackCell(x){const d=isAck(x.Docket);return `<td><button class="ackbtn ${
 function row(x){return `<tr><td><strong>${esc(x.Docket)}</strong></td><td>${esc(x.Sender)}</td><td>${esc(x.Service)}</td><td><span class="badge ${badgeClass(x)}">${esc(x.Status||"Unmatched")}</span></td><td>${x.Pallets||0}</td><td>${esc(x.Consignee)}</td><td>${esc(x.Postcode)}</td><td>${esc(x["Delivery Depot"])}</td>${ackCell(x)}</tr>`}
 function wire(root){root.querySelectorAll("[data-ack]").forEach(b=>b.onclick=()=>toggleAck(b.dataset.ack))}
 function fill(id,vals,label){const el=$(id);el.innerHTML=`<option value="">${label}</option>`+[...new Set(vals.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true})).map(v=>`<option>${esc(v)}</option>`).join("")}
+function refreshFilterLists(){
+ const rows=cardRows(headlineFilter);
+ fill("statusFilter",rows.map(r=>r.Status),"All statuses");
+ fill("customerFilter",rows.map(r=>r.Sender),"All customers / senders");
+ fill("serviceFilter",rows.map(r=>r.Service),"All services");
+ fill("depotFilter",rows.map(r=>r["Delivery Depot"]),"All depots");
+}
 function renderGrid(){
  const q=$("search").value.toLowerCase(),st=$("statusFilter").value,cust=$("customerFilter").value,svc=$("serviceFilter").value,dep=$("depotFilter").value,ack=$("ackFilter").value;
  let arr=cardRows(headlineFilter);
@@ -124,14 +131,15 @@ function applyHeadlineFilter(n){
  headlineFilter=n;
  document.querySelectorAll(".card[data-filter]").forEach(c=>c.classList.toggle("active",c.dataset.filter===n));
  ["search","statusFilter","customerFilter","serviceFilter","depotFilter","ackFilter"].forEach(id=>$(id).value="");
+ refreshFilterLists();
  renderGrid();
  $("gridBody").closest(".panel").scrollIntoView({behavior:"smooth",block:"start"});
 }
 function summaryTable(rows,field,label){const m={};rows.forEach(r=>{const k=r[field]||"Blank";m[k]=(m[k]||0)+1});return `<table class="mini"><thead><tr><th>${label}</th><th>Consignments</th></tr></thead><tbody>${Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,15).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join("")}</tbody></table>`}
-function renderAll(){renderGrid();$("serviceSummary").innerHTML=summaryTable(DATA,"Service","Service");$("depotSummary").innerHTML=summaryTable(DATA,"Delivery Depot","Depot")}
+function renderAll(){refreshFilterLists();renderGrid();$("serviceSummary").innerHTML=summaryTable(DATA,"Service","Service");$("depotSummary").innerHTML=summaryTable(DATA,"Delivery Depot","Depot")}
 document.querySelectorAll(".card[data-filter]").forEach(c=>c.onclick=()=>applyHeadlineFilter(c.dataset.filter));
 $("saveUser").onclick=()=>setUser($("ackUser").value);
-$("clearFilters").onclick=()=>{["search","statusFilter","customerFilter","serviceFilter","depotFilter","ackFilter"].forEach(id=>$(id).value="");renderGrid()};
+$("clearFilters").onclick=()=>{["search","statusFilter","customerFilter","serviceFilter","depotFilter","ackFilter"].forEach(id=>$(id).value="");refreshFilterLists();renderGrid()};
 ["search","statusFilter","customerFilter","serviceFilter","depotFilter","ackFilter"].forEach(id=>$(id).addEventListener(id==="search"?"input":"change",renderGrid));
 
 function updateMetricCards(){
