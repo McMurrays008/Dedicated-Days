@@ -399,16 +399,17 @@ scheduler.start()
 
 @app.on_event("startup")
 def startup_refresh():
-    """Recover an interrupted status refresh after a Render process restart.
+    """Restore refresh state and make sure the live dashboard is for today.
 
-    The morning population is already stored in dedicated-day-data.json.
-    If the previous process died while a status refresh was running, mark that
-    attempt as interrupted and automatically restart it once this process is up.
+    Render instances can restart and restore the repository copy of
+    dedicated-day-data.json. When OneDrive cloud sync is enabled, automatically
+    refresh from OneDrive on startup whenever the stored population is stale.
     """
     load_status()
 
     was_interrupted = bool(status.get("running")) and status.get("mode") == "status"
     status["running"] = False
+    today = datetime.now(TZ).date().isoformat()
 
     if was_interrupted:
         status["stage"] = "Recovering interrupted status refresh"
@@ -419,7 +420,6 @@ def startup_refresh():
             try:
                 payload = json.loads(DATA_FILE.read_text(encoding="utf-8"))
                 delivery_date = payload.get("delivery_date")
-                today = datetime.now(TZ).date().isoformat()
                 if delivery_date == today and payload.get("rows"):
                     print("[server] Recovering interrupted Browse status refresh after restart", flush=True)
                     threading.Timer(8.0, lambda: start_background("status")).start()
@@ -427,6 +427,21 @@ def startup_refresh():
             except Exception as e:
                 print(f"[server] Could not validate dashboard data for recovery: {e}", flush=True)
 
-        status["stage"] = "Idle"
-        status["last_error"] = "Refresh was interrupted by a restart; morning population was not available for automatic recovery."
-        save_status()
+    if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
+        needs_sync=True
+        if DATA_FILE.exists():
+            try:
+                payload=json.loads(DATA_FILE.read_text(encoding="utf-8"))
+                needs_sync=payload.get("delivery_date") != today or not payload.get("rows")
+            except Exception:
+                needs_sync=True
+        if needs_sync:
+            status["stage"]="Refreshing today's OneDrive data after startup"
+            status["last_error"]=None
+            save_status()
+            print("[server] Stored dashboard data is stale; starting OneDrive sync after startup",flush=True)
+            threading.Timer(5.0,lambda:start_background("onedrive")).start()
+            return
+
+    status["stage"]="Idle"
+    save_status()
