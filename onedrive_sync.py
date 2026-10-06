@@ -4,8 +4,10 @@ import html
 import json
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,19 +45,42 @@ def _download_url(shared_url: str) -> str:
 
 
 def _fetch_bytes(url: str) -> tuple[bytes, str, str]:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
-            "Accept": "*/*",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return (
-            resp.read(),
-            (resp.headers.get("Content-Type") or "").lower(),
-            resp.geturl(),
+    """Fetch a OneDrive/SharePoint URL with a small retry window for transient 429/5xx errors."""
+    last_error=None
+    for attempt in range(4):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+                "Accept": "*/*",
+            },
         )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return (
+                    resp.read(),
+                    (resp.headers.get("Content-Type") or "").lower(),
+                    resp.geturl(),
+                )
+        except urllib.error.HTTPError as e:
+            last_error=e
+            if e.code not in {429,500,502,503,504} or attempt==3:
+                raise
+            retry_after=e.headers.get("Retry-After")
+            try:
+                delay=max(2,int(retry_after))
+            except Exception:
+                delay=2*(attempt+1)
+            print(f"[onedrive] HTTP {e.code}; retrying in {delay}s (attempt {attempt+1}/4)",flush=True)
+            time.sleep(delay)
+        except urllib.error.URLError as e:
+            last_error=e
+            if attempt==3:
+                raise
+            delay=2*(attempt+1)
+            print(f"[onedrive] Network error; retrying in {delay}s (attempt {attempt+1}/4): {e}",flush=True)
+            time.sleep(delay)
+    raise last_error or RuntimeError("OneDrive fetch failed")
 
 
 def _download_with_browser(shared_url: str, target: Path) -> Path:
@@ -292,22 +317,44 @@ def _download(shared_url: str, target: Path, expected: str) -> Path:
 
 
 def sync_from_onedrive(stage_callback=None):
-    """Refresh the dashboard directly from two Anyone-with-the-link OneDrive files."""
+    """Refresh from OneDrive.
+
+    The morning workbook is only re-imported when today's fixed population is
+    missing or stale. Normal 5-minute runs download only Browse Export and
+    update statuses for the existing morning Dockets.
+    """
     tz = ZoneInfo(os.getenv("TIMEZONE", "Europe/London"))
     today = datetime.now(tz).date()
+    today_iso=today.isoformat()
 
     morning_url = _required("ONEDRIVE_MORNING_URL")
     status_url = _required("ONEDRIVE_STATUS_URL")
 
-    _stage(stage_callback, "Downloading TPN Dedicated Day Check from OneDrive")
-    morning_path = _download(
-        morning_url,
-        SYNC_DIR / "TPN Dedicated Day Check.xlsx",
-        "xlsx",
-    )
+    morning_result=None
+    population_ok=False
+    data_file=HERE/"dedicated-day-data.json"
+    if data_file.exists():
+        try:
+            current=json.loads(data_file.read_text(encoding="utf-8"))
+            population_ok=(
+                current.get("delivery_date")==today_iso
+                and bool(current.get("rows"))
+            )
+        except Exception:
+            population_ok=False
 
-    _stage(stage_callback, f"Importing morning population for {today.strftime('%d/%m/%Y')}")
-    morning_result = manual_morning_import(morning_path, stage_callback)
+    if not population_ok:
+        _stage(stage_callback, "Downloading today's TPN Dedicated Day Check from OneDrive")
+        morning_path = _download(
+            morning_url,
+            SYNC_DIR / "TPN Dedicated Day Check.xlsx",
+            "xlsx",
+        )
+
+        _stage(stage_callback, f"Importing morning population for {today.strftime('%d/%m/%Y')}")
+        morning_result = manual_morning_import(morning_path, stage_callback)
+    else:
+        _stage(stage_callback, "Today's morning population already loaded; checking Browse Export statuses")
 
     _stage(stage_callback, "Downloading Browse Export from OneDrive")
     status_path = _download(
@@ -320,7 +367,7 @@ def sync_from_onedrive(stage_callback=None):
     status_result = status_refresh_from_file(status_path, stage_callback)
 
     return {
-        "date": today.isoformat(),
+        "date": today_iso,
         "morning": morning_result,
         "status": status_result,
         "source": "OneDrive Anyone links",
