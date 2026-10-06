@@ -766,10 +766,17 @@ def read_xlsx(path):
     return out
 
 def first(r,*names):
-    lower={norm(k).lower():v for k,v in r.items()}
+    """Return the first populated matching column, tolerant of TPN header punctuation.
+
+    Examples treated as equivalent: Docket No, Docket No., Docket_No.
+    """
+    def key(v):
+        return re.sub(r"[^a-z0-9]","",norm(v).lower())
+    lower={key(k):v for k,v in r.items()}
     for n in names:
-        key=norm(n).lower()
-        if key in lower and norm(lower[key])!="": return lower[key]
+        k=key(n)
+        if k in lower and norm(lower[k])!="":
+            return lower[k]
     return ""
 
 def num(v):
@@ -1010,9 +1017,23 @@ def status_refresh_from_file(status_path, stage_callback=None):
 
     latest={}
     for r in source_rows:
-        docket=norm_docket(first(r,"Docket","Docket No","Docket Number","Consignment","Consignment Number"))
+        docket=norm_docket(first(
+            r,
+            "Docket","Docket No","Docket No.","Docket Number",
+            "Consignment","Consignment No","Consignment No.","Consignment Number"
+        ))
         if docket:
-            latest[docket]=norm(first(r,"STATUS","Status","Status Code"))
+            latest[docket]=norm(first(
+                r,
+                "STATUS","Status","Status Code","Current Status","Consignment Status"
+            ))
+
+    print(
+        f"[collector] Supplied status export rows={len(source_rows)} "
+        f"headers={list(source_rows[0].keys())[:30] if source_rows else []} "
+        f"dockets_with_status={sum(1 for v in latest.values() if v)}",
+        flush=True,
+    )
 
     changed=matched=0
     for r in current["rows"]:
@@ -1022,6 +1043,15 @@ def status_refresh_from_file(status_path, stage_callback=None):
             if latest[d] != norm(r.get("Status")):
                 r["Status"]=latest[d]
                 changed+=1
+
+    if source_rows and matched==0:
+        sample=list(latest.keys())[:5]
+        morning_sample=[norm_docket(r.get("Docket")) for r in current["rows"][:5]]
+        raise RuntimeError(
+            "Browse Export loaded but matched 0 morning Dockets. "
+            f"Status sample={sample}; morning sample={morning_sample}. "
+            "Check the Browse Export Docket/Status columns."
+        )
 
     current["generated_at"]=datetime.now(ZoneInfo(os.getenv("TIMEZONE","Europe/London"))).isoformat(timespec="seconds")
     current["mode"]="status_file"
