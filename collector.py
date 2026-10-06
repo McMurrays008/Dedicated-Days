@@ -795,7 +795,8 @@ def filter_browse(rows):
         dele=first(r,"Del","Deliver","Delivery Depot")
         if not service.startswith(prefix): continue
         if req and depot_code(req)!="8": continue
-        # 10 September method: Delivery Depot 8 is deliberately INCLUDED.
+        # Dedicated Day population rule: exclude anything delivering back to depot 8.
+        if dele and depot_code(dele)=="8": continue
         kept.append(r)
     return kept
 
