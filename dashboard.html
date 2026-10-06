@@ -85,7 +85,7 @@ table.data td{padding:10px 11px;border-bottom:1px solid var(--line2);white-space
 <footer><span>McMurrays TPN Dedicated Day Dashboard</span><span>Data provided by TPN · Dedicated Day export</span><span>Last updated: <span id="footerLastUpdated">Loading…</span> · Delivery date: <span id="deliveryDateLong">11 September 2026</span></span></footer>
 
 <script>
-const DATA=[];
+let DATA=[];
 const RISK=new Set(["ACH", "ATH", "ATHP", "ICC", "ITD", "ITDP", "ITH", "ITHP", "OFDP", "WCD", "WCDP", "WDDP"]);
 const ACK_KEY="tpn_dedicated_undelivered_style_ack_2026_09_11";
 const USER_KEY="tpn_dashboard_current_user";
