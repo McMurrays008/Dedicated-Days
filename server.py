@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -114,6 +117,68 @@ def start_background(mode):
 
     threading.Thread(target=worker, daemon=True).start()
     return True
+
+
+
+# Shared team acknowledgements use the same persistent service as the TPN Next Day dashboard.
+# Browsers call this Render service on the same origin; Render proxies to the shared store.
+ACK_UPSTREAM = os.getenv(
+    "ACK_UPSTREAM_URL",
+    "https://meek-lollipop-ea9426.netlify.app/api/acknowledgements",
+).strip()
+
+def _proxy_ack_request(method: str, body: bytes | None = None, query: str = ""):
+    url = ACK_UPSTREAM
+    if query:
+        url = f"{url}?{query}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "mcmurrays-dedicated-day-render-proxy/1.0",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+            code = int(getattr(resp, "status", 200))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        code = int(exc.code)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"Shared acknowledgement service unavailable: {type(exc).__name__}"},
+            status_code=502,
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        payload = {"ok": False, "error": "Invalid response from shared acknowledgement service."}
+        code = 502
+    return JSONResponse(
+        payload,
+        status_code=code,
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+@app.get("/api/acknowledgements")
+def acknowledgement_list(docket: str | None = None, t: str | None = None):
+    params = {}
+    if docket:
+        params["docket"] = docket
+    return _proxy_ack_request("GET", query=urllib.parse.urlencode(params))
+
+@app.post("/api/acknowledgements")
+async def acknowledgement_save(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+    encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    return _proxy_ack_request("POST", body=encoded)
 
 
 @app.get("/")
