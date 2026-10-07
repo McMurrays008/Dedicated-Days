@@ -106,7 +106,7 @@ footer{max-width:1540px;margin:0 auto;padding:17px 26px 24px;border-top:1px soli
   <div class="updatebox"><strong>Delivery date</strong><span id="deliveryDateShort">11 Sept 2026</span></div>
   <div class="updatebox"><strong>Last updated</strong><span id="lastUpdated">Loading…</span></div>
   <div class="userbox"><span class="userlabel">Current user</span><input id="ackUser" placeholder="Enter your name"><button id="saveUser" class="secondary">Set name</button></div>
-  <span id="userStatus" class="userlabel"></span><span id="liveRefreshStatus" class="userlabel">Live data: loading…</span>
+  <span id="userStatus" class="userlabel"></span><span id="ackSyncStatus" class="userlabel">Team acknowledgements: connecting…</span><span id="liveRefreshStatus" class="userlabel">Live data: loading…</span>
 </div>
 
 <main class="wrap">
@@ -144,22 +144,57 @@ footer{max-width:1540px;margin:0 auto;padding:17px 26px 24px;border-top:1px soli
 <script>
 let DATA=[];
 const RISK=new Set(["ACH", "ATH", "ATHP", "ICC", "ITD", "ITDP", "ITH", "ITHP", "OFDP", "WCD", "WCDP", "WDDP"]);
-const ACK_KEY="tpn_dedicated_undelivered_style_ack_2026_09_11";
 const USER_KEY="tpn_dashboard_current_user";
-let ackState={}; try{ackState=JSON.parse(localStorage.getItem(ACK_KEY)||"{}")}catch(e){ackState={}}
+const ACK_API="/api/acknowledgements";
+const ACK_POLL_MS=20000;
+let ackState={};
+let ackBusy=new Set();
 let headlineFilter="all";
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[s]));
 const p=r=>r.reduce((a,x)=>a+(+x.Pallets||0),0);
 function currentUser(){return(localStorage.getItem(USER_KEY)||"").trim()}
 function setUser(n){n=(n||"").trim();if(n)localStorage.setItem(USER_KEY,n);else localStorage.removeItem(USER_KEY);$("ackUser").value=n;$("userStatus").textContent=n?`Acknowledgements stamped as ${n}`:"Enter a name before acknowledging"}
-function isAck(d){return!!ackState[String(d)]}
-function ackLabel(d){const a=ackState[String(d)];return a?`${a.user} · ${a.time}`:""}
-function toggleAck(d){const k=String(d);if(ackState[k]){delete ackState[k]}else{const u=currentUser();if(!u){alert("Please enter your name first.");$("ackUser").focus();return}ackState[k]={user:u,time:new Date().toLocaleString("en-GB")}}localStorage.setItem(ACK_KEY,JSON.stringify(ackState));renderAll()}
+function isAck(d){return!!ackState[String(d)]?.acknowledged}
+function ackLabel(d){const a=ackState[String(d)];if(!a?.acknowledged)return"";return`${a.user} · ${new Date(a.time).toLocaleString("en-GB")}${a.note?` · ${a.note}`:""}`}
+function setAckSyncStatus(text,ok=true){const el=$("ackSyncStatus");if(!el)return;el.textContent=text;el.style.color=ok?"#3d6b4d":"#a33b32"}
+async function loadAcknowledgements(showError=false){
+ try{
+  const resp=await fetch(`${ACK_API}?t=${Date.now()}`,{cache:"no-store"});
+  if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
+  const payload=await resp.json();
+  if(!payload?.ok||typeof payload.acknowledgements!=="object")throw new Error("Invalid response");
+  ackState=payload.acknowledgements||{};
+  setAckSyncStatus("Team acknowledgements: connected",true);
+  renderAll();
+ }catch(err){
+  setAckSyncStatus("Team acknowledgements: unavailable",false);
+  if(showError)alert(`Shared acknowledgements could not be loaded: ${err.message}`);
+ }
+}
+async function toggleAck(d){
+ const k=String(d);
+ if(ackBusy.has(k))return;
+ const u=currentUser();
+ if(!u){alert("Please enter your name first.");$("ackUser").focus();return}
+ const currentlyAcked=isAck(k);
+ if(currentlyAcked&&!confirm(`Unacknowledge docket ${k}?`))return;
+ ackBusy.add(k);renderAll();setAckSyncStatus("Team acknowledgements: saving…",true);
+ try{
+  const resp=await fetch(ACK_API,{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json"},body:JSON.stringify({docket:k,action:currentlyAcked?"unacknowledge":"acknowledge",user:u,note:""})});
+  const payload=await resp.json().catch(()=>({}));
+  if(!resp.ok||!payload?.ok)throw new Error(payload?.error||`HTTP ${resp.status}`);
+  ackState[k]=payload.acknowledgement;
+  setAckSyncStatus("Team acknowledgements: connected",true);
+ }catch(err){
+  setAckSyncStatus("Team acknowledgements: save failed",false);
+  alert(`Acknowledgement was not saved: ${err.message}`);
+ }finally{ackBusy.delete(k);renderAll()}
+}
 function cardRows(n){if(n==="risk")return DATA.filter(x=>RISK.has(x.Status));if(n==="noscans")return DATA.filter(x=>x.Status==="CRE");if(n==="wdd")return DATA.filter(x=>x.Status==="WDD"||x.Status==="WDDP");if(n==="ofddel")return DATA.filter(x=>x.Status==="OFD"||x.Status==="DEL");if(n==="outstanding")return DATA.filter(x=>x.Status!=="DEL");return DATA}
 function title(n){return {all:"All Dedicated Day consignments",risk:"Risk consignments",noscans:"Jobs with No Scans",wdd:"WDD / WDDP consignments",ofddel:"Out for Delivery / Delivered",outstanding:"Outstanding consignments"}[n]||""}
 function badgeClass(x){return RISK.has(x.Status)?"risk":x.Status==="DEL"?"del":!x.Status?"blank":""}
-function ackCell(x){const d=isAck(x.Docket);return `<td><button class="ackbtn ${d?"done":""}" data-ack="${esc(x.Docket)}">${d?"✓ Acknowledged — click to undo":"Acknowledge"}</button>${d?`<span class="acknote">${esc(ackLabel(x.Docket))}</span>`:""}</td>`}
+function ackCell(x){const d=isAck(x.Docket),busy=ackBusy.has(String(x.Docket));return `<td><button class="ackbtn ${d?"done":""}" data-ack="${esc(x.Docket)}" ${busy?"disabled":""}>${busy?"Saving…":(d?"✓ Acknowledged — click to undo":"Acknowledge")}</button>${d?`<span class="acknote">${esc(ackLabel(x.Docket))}</span>`:""}</td>`}
 function row(x){return `<tr><td><strong>${esc(x.Docket)}</strong></td><td>${esc(x.Sender)}</td><td>${esc(x.Service)}</td><td><span class="badge ${badgeClass(x)}">${esc(x.Status||"Unmatched")}</span></td><td>${x.Pallets||0}</td><td>${esc(x.Consignee)}</td><td>${esc(x.Postcode)}</td><td>${esc(x["Delivery Depot"])}</td>${ackCell(x)}</tr>`}
 function wire(root){root.querySelectorAll("[data-ack]").forEach(b=>b.onclick=()=>toggleAck(b.dataset.ack))}
 function fill(id,vals,label){const el=$(id);el.innerHTML=`<option value="">${label}</option>`+[...new Set(vals.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true})).map(v=>`<option>${esc(v)}</option>`).join("")}
@@ -254,7 +289,9 @@ async function loadDashboardData(showAlert=false){
 }
 setUser(currentUser());
 loadDashboardData(true);
+loadAcknowledgements(false);
 setInterval(()=>loadDashboardData(false),5*60*1000);
+setInterval(()=>loadAcknowledgements(false),ACK_POLL_MS);
 
 </script>
 </body></html>
