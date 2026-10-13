@@ -146,7 +146,7 @@ let DATA=[];
 const RISK=new Set(["ACH", "ATH", "ATHP", "ICC", "ITD", "ITDP", "ITH", "ITHP", "OFDP", "WCD", "WCDP", "WDDP"]);
 const USER_KEY="tpn_dashboard_current_user";
 const ACK_API="/api/acknowledgements";
-const ACK_POLL_MS=20000;
+const ACK_POLL_MS=5*60*1000;
 let ackState={};
 let ackBusy=new Set();
 let headlineFilter="all";
@@ -291,7 +291,9 @@ setUser(currentUser());
 loadDashboardData(true);
 loadAcknowledgements(false);
 setInterval(()=>loadDashboardData(false),5*60*1000);
-setInterval(()=>loadAcknowledgements(false),ACK_POLL_MS);
+setInterval(()=>{if(!document.hidden)loadAcknowledgements(false)},ACK_POLL_MS);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)loadAcknowledgements(false)});
+window.addEventListener("focus",()=>loadAcknowledgements(false));
 
 </script>
 </body></html>
