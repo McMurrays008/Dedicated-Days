@@ -120,65 +120,131 @@ def start_background(mode):
 
 
 
-# Shared team acknowledgements use the same persistent service as the TPN Next Day dashboard.
-# Browsers call this Render service on the same origin; Render proxies to the shared store.
-ACK_UPSTREAM = os.getenv(
-    "ACK_UPSTREAM_URL",
-    "https://meek-lollipop-ea9426.netlify.app/api/acknowledgements",
-).strip()
+# Shared team acknowledgements are stored directly in the same Upstash Redis database.
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
+ACK_HASH_KEY = "tpn:team:acknowledgements"
+ACK_AUDIT_KEY = "tpn:team:acknowledgement:audit"
 
-def _proxy_ack_request(method: str, body: bytes | None = None, query: str = ""):
-    url = ACK_UPSTREAM
-    if query:
-        url = f"{url}?{query}"
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "mcmurrays-dedicated-day-render-proxy/1.0",
-    }
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read()
-            code = int(getattr(resp, "status", 200))
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        code = int(exc.code)
-    except Exception as exc:
-        return JSONResponse(
-            {"ok": False, "error": f"Shared acknowledgement service unavailable: {type(exc).__name__}"},
-            status_code=502,
-            headers={"Cache-Control": "no-store, max-age=0"},
-        )
-    try:
-        payload = json.loads(raw.decode("utf-8")) if raw else {}
-    except Exception:
-        payload = {"ok": False, "error": "Invalid response from shared acknowledgement service."}
-        code = 502
+def _ack_json(payload, status_code=200):
     return JSONResponse(
         payload,
-        status_code=code,
+        status_code=status_code,
         headers={"Cache-Control": "no-store, max-age=0"},
     )
 
+def _clean_text(value, max_len):
+    return str(value or "").strip()[:max_len]
+
+def _safe_docket(value):
+    docket = _clean_text(value, 80)
+    if not docket:
+        return None
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-")
+    return docket if all(ch in allowed for ch in docket) else None
+
+def _upstash(command):
+    if not UPSTASH_URL or not UPSTASH_TOKEN:
+        raise RuntimeError("Upstash Redis is not configured in Render")
+    req = urllib.request.Request(
+        UPSTASH_URL,
+        data=json.dumps(command).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {UPSTASH_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "mcmurrays-dedicated-day/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"Upstash HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Upstash unavailable: {type(exc).__name__}") from exc
+
+    try:
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception as exc:
+        raise RuntimeError("Invalid response from Upstash Redis") from exc
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError(str(payload["error"]))
+    return payload.get("result") if isinstance(payload, dict) else None
+
 @app.get("/api/acknowledgements")
 def acknowledgement_list(docket: str | None = None, t: str | None = None):
-    params = {}
-    if docket:
-        params["docket"] = docket
-    return _proxy_ack_request("GET", query=urllib.parse.urlencode(params))
+    try:
+        if docket:
+            safe = _safe_docket(docket)
+            if not safe:
+                return _ack_json({"ok": False, "error": "Invalid docket."}, 400)
+            raw = _upstash(["HGET", ACK_HASH_KEY, safe])
+            record = json.loads(raw) if raw else None
+            return _ack_json({"ok": True, "acknowledgement": record})
+
+        raw = _upstash(["HGETALL", ACK_HASH_KEY]) or []
+        acknowledgements = {}
+        if isinstance(raw, list):
+            for i in range(0, len(raw), 2):
+                if i + 1 >= len(raw):
+                    break
+                try:
+                    acknowledgements[str(raw[i])] = json.loads(raw[i + 1])
+                except Exception:
+                    continue
+        return _ack_json({
+            "ok": True,
+            "acknowledgements": acknowledgements,
+            "generated_at": datetime.now(TZ).isoformat(timespec="seconds"),
+            "backend": "upstash",
+        })
+    except Exception as exc:
+        print(f"[ack] GET failed: {type(exc).__name__}: {exc}", flush=True)
+        return _ack_json({"ok": False, "error": f"Could not load acknowledgements: {exc}"}, 502)
 
 @app.post("/api/acknowledgements")
 async def acknowledgement_save(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+        return _ack_json({"ok": False, "error": "Invalid JSON body."}, 400)
     if not isinstance(body, dict):
-        return JSONResponse({"ok": False, "error": "Invalid JSON body."}, status_code=400)
-    encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    return _proxy_ack_request("POST", body=encoded)
+        return _ack_json({"ok": False, "error": "Invalid JSON body."}, 400)
+
+    docket = _safe_docket(body.get("docket"))
+    action = _clean_text(body.get("action"), 20).lower()
+    user = _clean_text(body.get("user"), 80)
+    note = _clean_text(body.get("note"), 500)
+
+    if not docket:
+        return _ack_json({"ok": False, "error": "A valid docket is required."}, 400)
+    if action not in {"acknowledge", "unacknowledge"}:
+        return _ack_json({"ok": False, "error": "Action must be acknowledge or unacknowledge."}, 400)
+    if not user:
+        return _ack_json({"ok": False, "error": "User name is required."}, 400)
+
+    now = datetime.now(TZ).isoformat(timespec="seconds")
+    record = {
+        "docket": docket,
+        "acknowledged": action == "acknowledge",
+        "user": user,
+        "time": now,
+        "note": note,
+    }
+
+    try:
+        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        _upstash(["HSET", ACK_HASH_KEY, docket, encoded])
+        audit = json.dumps({**record, "action": action}, ensure_ascii=False, separators=(",", ":"))
+        _upstash(["LPUSH", ACK_AUDIT_KEY, audit])
+        _upstash(["LTRIM", ACK_AUDIT_KEY, "0", "1999"])
+        return _ack_json({"ok": True, "acknowledgement": record, "backend": "upstash"})
+    except Exception as exc:
+        print(f"[ack] POST failed: {type(exc).__name__}: {exc}", flush=True)
+        return _ack_json({"ok": False, "error": f"Could not save acknowledgement: {exc}"}, 502)
 
 
 @app.get("/")
