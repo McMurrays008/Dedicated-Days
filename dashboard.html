@@ -197,7 +197,13 @@ function badgeClass(x){return RISK.has(x.Status)?"risk":x.Status==="DEL"?"del":!
 function ackCell(x){const d=isAck(x.Docket),busy=ackBusy.has(String(x.Docket));return `<td><button class="ackbtn ${d?"done":""}" data-ack="${esc(x.Docket)}" ${busy?"disabled":""}>${busy?"Saving…":(d?"✓ Acknowledged — click to undo":"Acknowledge")}</button>${d?`<span class="acknote">${esc(ackLabel(x.Docket))}</span>`:""}</td>`}
 function row(x){return `<tr><td><strong>${esc(x.Docket)}</strong></td><td>${esc(x.Sender)}</td><td>${esc(x.Service)}</td><td><span class="badge ${badgeClass(x)}">${esc(x.Status||"Unmatched")}</span></td><td>${x.Pallets||0}</td><td>${esc(x.Consignee)}</td><td>${esc(x.Postcode)}</td><td>${esc(x["Delivery Depot"])}</td>${ackCell(x)}</tr>`}
 function wire(root){root.querySelectorAll("[data-ack]").forEach(b=>b.onclick=()=>toggleAck(b.dataset.ack))}
-function fill(id,vals,label){const el=$(id);el.innerHTML=`<option value="">${label}</option>`+[...new Set(vals.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true})).map(v=>`<option>${esc(v)}</option>`).join("")}
+function fill(id,vals,label){
+ const el=$(id);
+ const previous=el.value;
+ const options=[...new Set(vals.filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true}));
+ el.innerHTML=`<option value="">${label}</option>`+options.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join("");
+ if(previous && options.includes(previous)) el.value=previous;
+}
 function refreshFilterLists(){
  const rows=cardRows(headlineFilter);
  fill("statusFilter",rows.map(r=>r.Status),"All statuses");
