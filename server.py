@@ -444,8 +444,8 @@ pre{{background:#f4f7fb;padding:16px;border-radius:8px;overflow:auto}}
 
   <div class="card">
     <h2>Schedule</h2>
-    <p>Cloud mode: <strong>OneDrive status check every 5 minutes from 08:00 through 17:55 Europe/London</strong>.</p>
-    <p>Each cloud run re-reads the Dedicated Day Check and latest Browse Export / ConsignmentExport from the Dedicated Days OneDrive folder, so replacing the status file is picked up automatically within a few minutes.</p>
+    <p>Cloud mode: <strong>Manual Microsoft 365 refresh only</strong>.</p>
+    <p>Each cloud run re-reads the Dedicated Day Check and latest Browse Export / ConsignmentExport from the Dedicated Days OneDrive folder, when you select Sync OneDrive Now or Refresh Statuses.</p>
     <p>Status matching only updates Dockets from today's fixed morning population. Dashboard checks its JSON every 5 minutes.</p>
   </div>
 </div>
@@ -516,19 +516,8 @@ def scheduled_onedrive_sync():
     if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
         start_background("onedrive")
 
-# Check OneDrive every 5 minutes during the operating window.
-# This means replacing Browse Export.csv normally appears on the dashboard
-# within a few minutes, without waiting for an hourly refresh.
-scheduler.add_job(
-    scheduled_onedrive_sync,
-    "cron",
-    hour="8-17",
-    minute="*/5",
-    id="onedrive_5min_0800_1755",
-    replace_existing=True,
-)
-scheduler.start()
-
+# OneDrive status checks are manual only. Use POST /refresh/onedrive.
+# No scheduled polling is registered; this avoids unnecessary background work.
 
 @app.on_event("startup")
 def startup_refresh():
@@ -560,7 +549,7 @@ def startup_refresh():
             except Exception as e:
                 print(f"[server] Could not validate dashboard data for recovery: {e}", flush=True)
 
-    if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
+    if os.getenv("ONEDRIVE_AUTO_START","false").lower()=="true":
         needs_sync=True
         if DATA_FILE.exists():
             try:
