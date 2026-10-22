@@ -106,7 +106,7 @@ footer{max-width:1540px;margin:0 auto;padding:17px 26px 24px;border-top:1px soli
   <div class="updatebox"><strong>Delivery date</strong><span id="deliveryDateShort">11 Sept 2026</span></div>
   <div class="updatebox"><strong>Last updated</strong><span id="lastUpdated">Loading…</span></div>
   <div class="userbox"><span class="userlabel">Current user</span><input id="ackUser" placeholder="Enter your name"><button id="saveUser" class="secondary">Set name</button></div>
-  <span id="userStatus" class="userlabel"></span><span id="ackSyncStatus" class="userlabel">Team acknowledgements: connecting…</span><span id="liveRefreshStatus" class="userlabel">Live data: loading…</span>
+  <button id="refreshStatuses" class="secondary" type="button">Refresh Statuses</button><span id="manualRefreshMessage" class="userlabel" role="status"></span><span id="userStatus" class="userlabel"></span><span id="ackSyncStatus" class="userlabel">Team acknowledgements: connecting…</span><span id="liveRefreshStatus" class="userlabel">Live data: loading…</span>
 </div>
 
 <main class="wrap">
@@ -293,6 +293,21 @@ async function loadDashboardData(showAlert=false){
   if(showAlert) alert("Dashboard data could not be loaded.\n\n"+err.message);
  }
 }
+
+$("refreshStatuses").addEventListener("click",async()=>{
+ const btn=$("refreshStatuses"), msg=$("manualRefreshMessage");
+ const token=window.prompt("Enter the Dedicated Day refresh token from Render:");
+ if(!token)return;
+ btn.disabled=true;msg.textContent="Starting Microsoft 365 status refresh...";
+ try{
+  const r=await fetch("/refresh/onedrive",{method:"POST",headers:{"X-Refresh-Token":token}});
+  const body=await r.json();
+  if(!r.ok||!body.ok)throw new Error(body.detail||body.message||"Refresh request failed");
+  msg.textContent="Refresh started. The dashboard will update when processing completes.";
+  setTimeout(()=>{loadDashboardData(false);btn.disabled=false;},15000);
+ }catch(e){msg.textContent="Refresh could not start: "+e.message;btn.disabled=false;}
+});
+
 setUser(currentUser());
 loadDashboardData(true);
 loadAcknowledgements(false);
