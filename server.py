@@ -516,19 +516,8 @@ def scheduled_onedrive_sync():
     if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
         start_background("onedrive")
 
-# Check OneDrive every 5 minutes during the operating window.
-# This means replacing Browse Export.csv normally appears on the dashboard
-# within a few minutes, without waiting for an hourly refresh.
-scheduler.add_job(
-    scheduled_onedrive_sync,
-    "cron",
-    hour="8-17",
-    minute="*/5",
-    id="onedrive_5min_0800_1755",
-    replace_existing=True,
-)
-scheduler.start()
-
+# OneDrive status checks are manual only. Use POST /refresh/onedrive.
+# No scheduled polling is registered; this avoids unnecessary background work.
 
 @app.on_event("startup")
 def startup_refresh():
@@ -560,7 +549,7 @@ def startup_refresh():
             except Exception as e:
                 print(f"[server] Could not validate dashboard data for recovery: {e}", flush=True)
 
-    if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
+    if False:  # Manual-only mode: never import from OneDrive on startup.
         needs_sync=True
         if DATA_FILE.exists():
             try:
