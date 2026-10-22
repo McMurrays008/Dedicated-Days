@@ -304,7 +304,27 @@ $("refreshStatuses").addEventListener("click",async()=>{
   const body=await r.json();
   if(!r.ok||!body.ok)throw new Error(body.detail||body.message||"Refresh request failed");
   msg.textContent="Refresh started. The dashboard will update when processing completes.";
-  setTimeout(()=>{loadDashboardData(false);btn.disabled=false;},15000);
+  let tries=0;
+  const poll=async()=>{
+   tries++;
+   try{
+    const sr=await fetch("/health?ts="+Date.now(),{cache:"no-store"});
+    if(!sr.ok)throw new Error("Could not check refresh status");
+    const state=(await sr.json()).status||{};
+    if(state.running){
+     msg.textContent="Refreshing Microsoft 365 statuses: "+(state.stage||"working...");
+     if(tries<120){setTimeout(poll,3000);return;}
+     msg.textContent="Refresh is taking longer than expected; check Last updated shortly.";
+    }else if(state.last_error){
+     msg.textContent="Refresh failed: "+state.last_error;
+    }else{
+     await loadDashboardData(false);
+     msg.textContent="Statuses refreshed successfully. Last updated is shown above.";
+    }
+   }catch(e){msg.textContent="Refresh started, but could not verify completion: "+e.message;}
+   btn.disabled=false;
+  };
+  setTimeout(poll,3000);
  }catch(e){msg.textContent="Refresh could not start: "+e.message;btn.disabled=false;}
 });
 
