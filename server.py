@@ -318,6 +318,38 @@ async def morning_import(file: UploadFile = File(...), x_refresh_token: str | No
         raise HTTPException(500,str(e))
 
 
+@app.post("/status-import")
+async def status_import(file: UploadFile = File(...), x_refresh_token: str | None = Header(default=None)):
+    """Manually apply a Browse Export CSV/XLSX to today's fixed morning population."""
+    expected=os.getenv("REFRESH_TOKEN")
+    if not expected:
+        raise HTTPException(503,"REFRESH_TOKEN is not configured in Render")
+    if x_refresh_token != expected:
+        raise HTTPException(401,"Invalid refresh token")
+    name=(file.filename or "Browse Export.csv").strip()
+    suffix=Path(name).suffix.lower()
+    if suffix not in {".csv",".xlsx"}:
+        raise HTTPException(400,"Please upload Browse Export as .csv or .xlsx")
+    target=HERE/("manual-browse-export"+suffix)
+    body=await file.read()
+    if not body:
+        raise HTTPException(400,"Browse Export upload was empty")
+    target.write_bytes(body)
+    try:
+        result=status_refresh_from_file(target)
+        status.update(
+            last_success=datetime.now(TZ).isoformat(timespec="seconds"),
+            last_error=None,
+            stage="Browse Export import completed",
+        )
+        save_status()
+        return {"ok":True,"result":result}
+    except Exception as e:
+        status.update(last_error=f"{type(e).__name__}: {e}",stage="Browse Export import failed")
+        save_status()
+        raise HTTPException(500,str(e))
+
+
 @app.post("/power-automate/morning")
 async def power_automate_morning(
     request: Request,
@@ -510,71 +542,14 @@ setInterval(loadStatus, 5000);
     )
 
 
-scheduler = BackgroundScheduler(timezone=TZ)
-
-def scheduled_onedrive_sync():
-    if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
-        start_background("onedrive")
-
-# Check OneDrive every 5 minutes during the operating window.
-# This means replacing Browse Export.csv normally appears on the dashboard
-# within a few minutes, without waiting for an hourly refresh.
-scheduler.add_job(
-    scheduled_onedrive_sync,
-    "cron",
-    hour="8-17",
-    minute="*/5",
-    id="onedrive_5min_0800_1755",
-    replace_existing=True,
-)
-scheduler.start()
-
+# Automatic OneDrive/status polling is intentionally disabled.
+# Dashboard data changes only when a user uploads a morning check or Browse Export.
 
 @app.on_event("startup")
 def startup_refresh():
-    """Restore refresh state and make sure the live dashboard is for today.
-
-    Render instances can restart and restore the repository copy of
-    dedicated-day-data.json. When OneDrive cloud sync is enabled, automatically
-    refresh from OneDrive on startup whenever the stored population is stale.
-    """
+    """Restore status only. Manual uploads are the sole source of dashboard updates."""
     load_status()
-
-    was_interrupted = bool(status.get("running")) and status.get("mode") == "status"
     status["running"] = False
-    today = datetime.now(TZ).date().isoformat()
-
-    if was_interrupted:
-        status["stage"] = "Recovering interrupted status refresh"
-        status["last_error"] = "Previous web process restarted during status refresh; retrying automatically."
-        save_status()
-
-        if DATA_FILE.exists():
-            try:
-                payload = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-                delivery_date = payload.get("delivery_date")
-                if delivery_date == today and payload.get("rows"):
-                    print("[server] Recovering interrupted Browse status refresh after restart", flush=True)
-                    threading.Timer(8.0, lambda: start_background("status")).start()
-                    return
-            except Exception as e:
-                print(f"[server] Could not validate dashboard data for recovery: {e}", flush=True)
-
-    if os.getenv("ONEDRIVE_SYNC_ENABLED","false").lower()=="true":
-        needs_sync=True
-        if DATA_FILE.exists():
-            try:
-                payload=json.loads(DATA_FILE.read_text(encoding="utf-8"))
-                needs_sync=payload.get("delivery_date") != today or not payload.get("rows")
-            except Exception:
-                needs_sync=True
-        if needs_sync:
-            status["stage"]="Refreshing today's OneDrive data after startup"
-            status["last_error"]=None
-            save_status()
-            print("[server] Stored dashboard data is stale; starting OneDrive sync after startup",flush=True)
-            threading.Timer(5.0,lambda:start_background("onedrive")).start()
-            return
-
-    status["stage"]="Idle"
+    status["mode"] = "manual"
+    status["stage"] = "Waiting for manual upload"
     save_status()
