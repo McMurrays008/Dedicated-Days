@@ -125,6 +125,8 @@ UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
 ACK_HASH_KEY = "tpn:team:acknowledgements"
 ACK_AUDIT_KEY = "tpn:team:acknowledgement:audit"
+DEDICATED_DATA_KEY = "tpn:dedicated-day:latest-dashboard"
+
 
 def _ack_json(payload, status_code=200):
     return JSONResponse(
@@ -132,6 +134,33 @@ def _ack_json(payload, status_code=200):
         status_code=status_code,
         headers={"Cache-Control": "no-store, max-age=0"},
     )
+
+def _persist_shared_dashboard():
+    """Persist the latest Dedicated Day payload in shared Redis storage."""
+    if not DATA_FILE.exists():
+        return
+    raw = DATA_FILE.read_text(encoding="utf-8")
+    _upstash(["SET", DEDICATED_DATA_KEY, raw])
+
+def _restore_shared_dashboard():
+    """Restore the shared latest payload into this Render instance if available."""
+    try:
+        raw = _upstash(["GET", DEDICATED_DATA_KEY])
+    except Exception as exc:
+        print(f"[data] Shared dashboard restore unavailable: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
+            raise ValueError("invalid dashboard payload")
+        DATA_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as exc:
+        print(f"[data] Shared dashboard payload invalid: {type(exc).__name__}: {exc}", flush=True)
+        return False
+
 
 def _clean_text(value, max_len):
     return str(value or "").strip()[:max_len]
@@ -259,6 +288,17 @@ def dashboard():
 
 @app.get("/dedicated-day-data.json")
 def data():
+    try:
+        raw = _upstash(["GET", DEDICATED_DATA_KEY])
+        if raw:
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and isinstance(payload.get("rows"), list):
+                return JSONResponse(
+                    payload,
+                    headers={"Cache-Control": "no-store, max-age=0"},
+                )
+    except Exception as exc:
+        print(f"[data] Shared dashboard read failed: {type(exc).__name__}: {exc}", flush=True)
     return FileResponse(
         HERE / "dedicated-day-data.json",
         media_type="application/json",
@@ -309,6 +349,7 @@ async def morning_import(file: UploadFile = File(...), x_refresh_token: str | No
     target.write_bytes(await file.read())
     try:
         result=manual_morning_import(target)
+        _persist_shared_dashboard()
         status.update(last_success=datetime.now(TZ).isoformat(timespec="seconds"),last_error=None,stage="Morning import completed")
         save_status()
         return {"ok":True,"result":result}
@@ -336,7 +377,9 @@ async def status_import(file: UploadFile = File(...), x_refresh_token: str | Non
         raise HTTPException(400,"Browse Export upload was empty")
     target.write_bytes(body)
     try:
+        _restore_shared_dashboard()
         result=status_refresh_from_file(target)
+        _persist_shared_dashboard()
         status.update(
             last_success=datetime.now(TZ).isoformat(timespec="seconds"),
             last_error=None,
@@ -549,6 +592,7 @@ setInterval(loadStatus, 5000);
 def startup_refresh():
     """Restore status only. Manual uploads are the sole source of dashboard updates."""
     load_status()
+    _restore_shared_dashboard()
     status["running"] = False
     status["mode"] = "manual"
     status["stage"] = "Waiting for manual upload"
