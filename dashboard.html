@@ -319,14 +319,20 @@ async function loadDashboardData(showAlert=false){
   if(showAlert) alert("Dashboard data could not be loaded.\n\n"+err.message);
  }
 }
-const REFRESH_TOKEN_KEY="tpn_dedicated_refresh_token";
-function getRefreshToken(){
- let token=sessionStorage.getItem(REFRESH_TOKEN_KEY)||"";
- if(!token){
-   token=prompt("Enter the Dedicated Day refresh token to upload files:")||"";
-   if(token)sessionStorage.setItem(REFRESH_TOKEN_KEY,token);
- }
- return token;
+async function uploadWithRememberedAccess(url, form){
+ let resp=await fetch(url,{method:"POST",credentials:"same-origin",body:form});
+ if(resp.status!==401) return resp;
+
+ const token=prompt("Enter the Dedicated Day refresh token once for this browser:")||"";
+ if(!token) return resp;
+
+ resp=await fetch(url,{
+   method:"POST",
+   credentials:"same-origin",
+   headers:{"X-Refresh-Token":token},
+   body:form
+ });
+ return resp;
 }
 async function uploadDashboardFile(kind){
  const isMorning=kind==="morning";
@@ -335,17 +341,14 @@ async function uploadDashboardFile(kind){
  const msg=$(isMorning?"morningUploadMsg":"statusUploadMsg");
  const file=input&&input.files?input.files[0]:null;
  if(!file){msg.textContent="Choose a file first.";return}
- const token=getRefreshToken();
- if(!token){msg.textContent="Upload cancelled - refresh token required.";return}
  btn.disabled=true;
  msg.textContent=isMorning?"Uploading morning Dedicated Day Check...":"Uploading Browse Export and updating statuses...";
  try{
    const form=new FormData();
    form.append("file",file);
-   const resp=await fetch(isMorning?"/morning-import":"/status-import",{method:"POST",headers:{"X-Refresh-Token":token},body:form});
+   const resp=await uploadWithRememberedAccess(isMorning?"/morning-import":"/status-import",form);
    const payload=await resp.json().catch(function(){return {}});
    if(!resp.ok||!payload.ok){
-     if(resp.status===401)sessionStorage.removeItem(REFRESH_TOKEN_KEY);
      throw new Error(payload.detail||payload.error||("HTTP "+resp.status));
    }
    msg.textContent=isMorning?"Morning check uploaded successfully. Dashboard population updated.":"Browse Export uploaded successfully. Statuses updated.";
