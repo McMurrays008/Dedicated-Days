@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import threading
 import urllib.error
@@ -306,6 +307,35 @@ def data():
     )
 
 
+UPLOAD_AUTH_COOKIE = "tpn_dedicated_upload_auth"
+
+def _upload_cookie_value():
+    expected = os.getenv("REFRESH_TOKEN", "")
+    return hashlib.sha256(expected.encode("utf-8")).hexdigest() if expected else ""
+
+def _upload_authorized(request: Request, x_refresh_token: str | None):
+    expected = os.getenv("REFRESH_TOKEN")
+    if not expected:
+        raise HTTPException(503, "REFRESH_TOKEN is not configured in Render")
+    cookie_ok = request.cookies.get(UPLOAD_AUTH_COOKIE) == _upload_cookie_value()
+    header_ok = bool(x_refresh_token) and x_refresh_token == expected
+    if not (cookie_ok or header_ok):
+        raise HTTPException(401, "Upload authorisation required")
+    return True
+
+def _remember_upload_browser(response: JSONResponse):
+    response.set_cookie(
+        key=UPLOAD_AUTH_COOKIE,
+        value=_upload_cookie_value(),
+        max_age=15552000,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
 @app.get("/health")
 def health():
     return JSONResponse(
@@ -337,12 +367,8 @@ def refresh(mode: str, x_refresh_token: str | None = Header(default=None)):
 
 
 @app.post("/morning-import")
-async def morning_import(file: UploadFile = File(...), x_refresh_token: str | None = Header(default=None)):
-    expected=os.getenv("REFRESH_TOKEN")
-    if not expected:
-        raise HTTPException(503,"REFRESH_TOKEN is not configured in Render")
-    if x_refresh_token != expected:
-        raise HTTPException(401,"Invalid refresh token")
+async def morning_import(request: Request, file: UploadFile = File(...), x_refresh_token: str | None = Header(default=None)):
+    _upload_authorized(request, x_refresh_token)
     if not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(400,"Please upload the TPN Dedicated Day Check .xlsx file")
     target=HERE/"morning-dedicated-day-check.xlsx"
@@ -352,7 +378,7 @@ async def morning_import(file: UploadFile = File(...), x_refresh_token: str | No
         _persist_shared_dashboard()
         status.update(last_success=datetime.now(TZ).isoformat(timespec="seconds"),last_error=None,stage="Morning import completed")
         save_status()
-        return {"ok":True,"result":result}
+        return _remember_upload_browser(JSONResponse({"ok":True,"result":result}))
     except Exception as e:
         status.update(last_error=f"{type(e).__name__}: {e}",stage="Morning import failed")
         save_status()
@@ -360,13 +386,9 @@ async def morning_import(file: UploadFile = File(...), x_refresh_token: str | No
 
 
 @app.post("/status-import")
-async def status_import(file: UploadFile = File(...), x_refresh_token: str | None = Header(default=None)):
+async def status_import(request: Request, file: UploadFile = File(...), x_refresh_token: str | None = Header(default=None)):
     """Manually apply a Browse Export CSV/XLSX to today's fixed morning population."""
-    expected=os.getenv("REFRESH_TOKEN")
-    if not expected:
-        raise HTTPException(503,"REFRESH_TOKEN is not configured in Render")
-    if x_refresh_token != expected:
-        raise HTTPException(401,"Invalid refresh token")
+    _upload_authorized(request, x_refresh_token)
     name=(file.filename or "Browse Export.csv").strip()
     suffix=Path(name).suffix.lower()
     if suffix not in {".csv",".xlsx"}:
@@ -386,7 +408,7 @@ async def status_import(file: UploadFile = File(...), x_refresh_token: str | Non
             stage="Browse Export import completed",
         )
         save_status()
-        return {"ok":True,"result":result}
+        return _remember_upload_browser(JSONResponse({"ok":True,"result":result}))
     except Exception as e:
         status.update(last_error=f"{type(e).__name__}: {e}",stage="Browse Export import failed")
         save_status()
