@@ -74,6 +74,7 @@ button{font:inherit;border:0;border-radius:8px;padding:9px 13px;cursor:pointer}
 .tablewrap{overflow:auto;border-top:1px solid var(--line);border-radius:0;background:#fff;max-height:570px}
 table.data{width:100%;border-collapse:collapse;min-width:1120px;font-size:12px}
 table.data th{position:sticky;top:0;background:#edf3f7;color:#0e2a54;text-align:left;padding:11px;border-bottom:1px solid #cfdeeb;z-index:1;font-weight:800}
+table.data th .sort-heading{display:inline-flex;align-items:center;gap:6px;border:0;padding:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;white-space:nowrap}table.data th .sort-heading:hover{text-decoration:underline}table.data th .sort-heading:focus-visible{outline:2px solid #0877d8;outline-offset:3px}table.data th .sort-arrow{opacity:.6}table.data th[aria-sort="ascending"] .sort-arrow,table.data th[aria-sort="descending"] .sort-arrow{opacity:1;color:#0877d8}
 table.data td{padding:10px 11px;border-bottom:1px solid var(--line2);white-space:nowrap;color:#18365f}
 table.data tbody tr:nth-child(even){background:#fbfcfe}
 table.data tbody tr:hover{background:#f2f7fc}
@@ -156,7 +157,7 @@ footer{max-width:1540px;margin:0 auto;padding:17px 26px 24px;border-top:1px soli
 </div>
 <div class="toolbar2"><select id="ackFilter"><option value="">All acknowledgement states</option><option value="ack">Acknowledged</option><option value="unack">Not acknowledged</option></select><button id="clearFilters" class="secondary">Clear filters</button></div>
 <div id="resultMeta" class="meta"></div>
-<div class="tablewrap"><table class="data"><thead><tr><th>Docket</th><th>Sender</th><th>Service</th><th>Status</th><th>Pallets</th><th>Consignee</th><th>Postcode</th><th>Delivery Depot</th><th>Customer Advised</th></tr></thead><tbody id="gridBody"></tbody></table></div>
+<div class="tablewrap"><table class="data"><thead><tr><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Docket" aria-label="Sort Docket: ascending, descending, default">Docket<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Sender" aria-label="Sort Sender: ascending, descending, default">Sender<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Service" aria-label="Sort Service: ascending, descending, default">Service<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Status" aria-label="Sort Status: ascending, descending, default">Status<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Pallets" aria-label="Sort Pallets: ascending, descending, default">Pallets<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Consignee" aria-label="Sort Consignee: ascending, descending, default">Consignee<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Postcode" aria-label="Sort Postcode: ascending, descending, default">Postcode<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="Delivery Depot" aria-label="Sort Delivery Depot: ascending, descending, default">Delivery Depot<span class="sort-arrow" aria-hidden="true">↕</span></button></th><th scope="col" aria-sort="none"><button type="button" class="sort-heading" data-sort="CustomerAdvised" aria-label="Sort Customer Advised: ascending, descending, default">Customer Advised<span class="sort-arrow" aria-hidden="true">↕</span></button></th></tr></thead><tbody id="gridBody"></tbody></table></div>
 </section>
 
 <section class="summarygrid">
@@ -176,6 +177,8 @@ const ACK_POLL_MS=5*60*1000;
 let ackState={};
 let ackBusy=new Set();
 let headlineFilter="all";
+let gridSort={column:null,direction:0};
+const gridColumns=["Docket","Sender","Service","Status","Pallets","Consignee","Postcode","Delivery Depot","CustomerAdvised"];
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[s]));
 const p=r=>r.reduce((a,x)=>a+(+x.Pallets||0),0);
@@ -237,6 +240,29 @@ function refreshFilterLists(){
  fill("serviceFilter",rows.map(r=>r.Service),"All services");
  fill("depotFilter",rows.map(r=>r["Delivery Depot"]),"All depots");
 }
+function sortedGridRows(items){
+ if(!gridSort.column||!gridSort.direction)return items;
+ const key=gridSort.column, direction=gridSort.direction;
+ function compare(a,b){
+  if(key==="CustomerAdvised")return Number(isAck(a.Docket))-Number(isAck(b.Docket));
+  if(key==="Pallets")return (Number(a.Pallets)||0)-(Number(b.Pallets)||0);
+  return String(a[key]??"").localeCompare(String(b[key]??""),"en-GB",{numeric:true,sensitivity:"base"});
+ }
+ return items.map((item,index)=>({item,index})).sort((a,b)=>direction*compare(a.item,b.item)||a.index-b.index).map(x=>x.item);
+}
+function updateGridSortHeadings(){
+ document.querySelectorAll(".sort-heading").forEach(button=>{
+  const dir=button.dataset.sort===gridSort.column?gridSort.direction:0;
+  button.parentElement.setAttribute("aria-sort",dir===1?"ascending":dir===-1?"descending":"none");
+  button.querySelector(".sort-arrow").textContent=dir===1?"▲":dir===-1?"▼":"↕";
+  button.title=dir===1?"Sorted ascending; click for descending":dir===-1?"Sorted descending; click for default":"Click to sort ascending";
+ });
+}
+function cycleGridSort(key){
+ if(!gridColumns.includes(key))return;
+ gridSort=gridSort.column!==key?{column:key,direction:1}:gridSort.direction===1?{column:key,direction:-1}:{column:null,direction:0};
+ renderGrid();
+}
 function renderGrid(){
  const q=$("search").value.toLowerCase(),st=$("statusFilter").value,cust=$("customerFilter").value,svc=$("serviceFilter").value,dep=$("depotFilter").value,ack=$("ackFilter").value;
  let arr=cardRows(headlineFilter);
@@ -248,7 +274,8 @@ function renderGrid(){
  if(ack==="ack")arr=arr.filter(r=>isAck(r.Docket));
  if(ack==="unack")arr=arr.filter(r=>!isAck(r.Docket));
  $("resultMeta").textContent=`${title(headlineFilter)} · ${arr.length} consignments · ${p(arr)} pallets`;
- $("gridBody").innerHTML=arr.map(row).join("");
+ updateGridSortHeadings();
+ $("gridBody").innerHTML=sortedGridRows(arr).map(row).join("");
  wire($("gridBody"));
 }
 function applyHeadlineFilter(n){
@@ -261,6 +288,7 @@ function applyHeadlineFilter(n){
 }
 function summaryTable(rows,field,label){const m={};rows.forEach(r=>{const k=r[field]||"Blank";m[k]=(m[k]||0)+1});return `<table class="mini"><thead><tr><th>${label}</th><th>Consignments</th></tr></thead><tbody>${Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,15).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join("")}</tbody></table>`}
 function renderAll(){refreshFilterLists();renderGrid();$("serviceSummary").innerHTML=summaryTable(DATA,"Service","Service");$("depotSummary").innerHTML=summaryTable(DATA,"Delivery Depot","Depot")}
+document.querySelectorAll(".sort-heading").forEach(button=>button.addEventListener("click",()=>cycleGridSort(button.dataset.sort)));
 document.querySelectorAll(".card[data-filter]").forEach(c=>c.onclick=()=>applyHeadlineFilter(c.dataset.filter));
 $("saveUser").onclick=()=>setUser($("ackUser").value);
 $("clearFilters").onclick=()=>{["search","statusFilter","customerFilter","serviceFilter","depotFilter","ackFilter"].forEach(id=>$(id).value="");refreshFilterLists();renderGrid()};
